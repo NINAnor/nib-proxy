@@ -6,16 +6,19 @@ import respx
 from asgi_lifespan import LifespanManager
 
 from nib_proxy.app import create_app
-from nib_proxy.config import CacheConfig, ServiceConfig, Settings
+from nib_proxy.config import CacheConfig, CorsConfig, ServiceConfig, Settings
 
 
-def _settings(*, cache_enabled: bool = False) -> Settings:
+def _settings(
+    *, cache_enabled: bool = False, cors: CorsConfig | None = None
+) -> Settings:
     return Settings(
         nib_username="user",
         nib_password="pass",
         token_url="https://services.norgeibilder.no/token/tilecache",
         token_validity_seconds=3600,
         cache_max_entries=100,
+        cors=cors or CorsConfig(),
         services=(
             ServiceConfig(
                 name="wmts-utm32",
@@ -169,3 +172,78 @@ async def test_token_endpoint_error_is_propagated_verbatim():
     # code and body), instead of a generic/opaque 500, to ease debugging.
     assert response.status_code == 401
     assert response.json() == {"error": "Invalid username or password."}
+
+
+@pytest.mark.asyncio
+async def test_cors_preflight_is_handled_with_default_wildcard_origin():
+    settings = _settings()
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.options(
+                "/wmts/utm32/1/2/3.png",
+                headers={
+                    "origin": "https://example.com",
+                    "access-control-request-method": "GET",
+                },
+            )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cors_headers_present_on_actual_response():
+    settings = _settings()
+    respx.post(settings.token_url).mock(
+        return_value=httpx.Response(200, json={"token": "tok"})
+    )
+    respx.get("https://tilecache.norgeibilder.no/wmts/utm32_euref89/1/2/3.png").mock(
+        return_value=httpx.Response(200, content=b"tile-bytes")
+    )
+
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get(
+                "/wmts/utm32/1/2/3.png",
+                headers={"origin": "https://example.com"},
+            )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
+
+
+@pytest.mark.asyncio
+async def test_cors_restricted_to_configured_origins():
+    settings = _settings(cors=CorsConfig(allow_origins=("https://allowed.example",)))
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            allowed = await client.options(
+                "/wmts/utm32/1/2/3.png",
+                headers={
+                    "origin": "https://allowed.example",
+                    "access-control-request-method": "GET",
+                },
+            )
+            disallowed = await client.options(
+                "/wmts/utm32/1/2/3.png",
+                headers={
+                    "origin": "https://not-allowed.example",
+                    "access-control-request-method": "GET",
+                },
+            )
+
+    assert allowed.headers["access-control-allow-origin"] == "https://allowed.example"
+    assert "access-control-allow-origin" not in disallowed.headers

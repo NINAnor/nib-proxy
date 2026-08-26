@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 from nib_proxy.client_key import resolve_client_key
 from nib_proxy.config import Settings, load_settings
@@ -71,6 +72,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.token_cache = token_cache
     app.state.response_cache = response_cache
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(settings.cors.allow_origins),
+        allow_methods=list(settings.cors.allow_methods),
+        allow_headers=list(settings.cors.allow_headers),
+        allow_credentials=settings.cors.allow_credentials,
+    )
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

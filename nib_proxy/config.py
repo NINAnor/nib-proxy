@@ -44,6 +44,22 @@ class ServiceConfig:
 
 
 @dataclass(frozen=True)
+class CorsConfig:
+    """CORS settings for the proxy.
+
+    Since this proxy is meant to be called directly from browsers on
+    arbitrary origins (the same origins that get bound to NiB tokens via the
+    Referer header), CORS must be handled explicitly rather than left to
+    fail silently in the browser.
+    """
+
+    allow_origins: tuple[str, ...] = ("*",)
+    allow_methods: tuple[str, ...] = ("*",)
+    allow_headers: tuple[str, ...] = ("*",)
+    allow_credentials: bool = False
+
+
+@dataclass(frozen=True)
 class Settings:
     """Global proxy settings."""
 
@@ -53,6 +69,7 @@ class Settings:
     token_validity_seconds: int
     cache_max_entries: int
     services: tuple[ServiceConfig, ...]
+    cors: CorsConfig = field(default_factory=CorsConfig)
 
     def match_service(self, path: str) -> tuple[ServiceConfig, str] | None:
         """Find the service whose prefix matches the given path.
@@ -117,4 +134,10 @@ def load_settings() -> Settings:
         token_validity_seconds=env.int("TOKEN_VALIDITY_SECONDS", default=3600),
         cache_max_entries=env.int("CACHE_MAX_ENTRIES", default=5000),
         services=_load_services(config_path),
+        cors=CorsConfig(
+            allow_origins=tuple(env.list("CORS_ALLOW_ORIGINS", default=["*"])),
+            allow_methods=tuple(env.list("CORS_ALLOW_METHODS", default=["*"])),
+            allow_headers=tuple(env.list("CORS_ALLOW_HEADERS", default=["*"])),
+            allow_credentials=env.bool("CORS_ALLOW_CREDENTIALS", default=False),
+        ),
     )
