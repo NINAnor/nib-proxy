@@ -10,7 +10,10 @@ from nib_proxy.config import CacheConfig, CorsConfig, ServiceConfig, Settings
 
 
 def _settings(
-    *, cache_enabled: bool = False, cors: CorsConfig | None = None
+    *,
+    cache_enabled: bool = False,
+    cors: CorsConfig | None = None,
+    base_path: str = "",
 ) -> Settings:
     return Settings(
         nib_username="user",
@@ -19,6 +22,7 @@ def _settings(
         token_validity_seconds=3600,
         cache_max_entries=100,
         cors=cors or CorsConfig(),
+        base_path=base_path,
         services=(
             ServiceConfig(
                 name="wmts-utm32",
@@ -247,3 +251,85 @@ async def test_cors_restricted_to_configured_origins():
 
     assert allowed.headers["access-control-allow-origin"] == "https://allowed.example"
     assert "access-control-allow-origin" not in disallowed.headers
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_base_path_is_used_for_routing():
+    settings = _settings(base_path="/nib")
+    respx.post(settings.token_url).mock(
+        return_value=httpx.Response(200, json={"token": "tok"})
+    )
+    upstream = respx.get(
+        "https://tilecache.norgeibilder.no/wmts/utm32_euref89/1/2/3.png"
+    ).mock(return_value=httpx.Response(200, content=b"tile-bytes"))
+
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get("/nib/wmts/utm32/1/2/3.png")
+
+    assert response.status_code == 200
+    assert response.content == b"tile-bytes"
+    assert upstream.calls.last.request.headers["x-esri-authorization"] == "Bearer tok"
+
+
+@pytest.mark.asyncio
+async def test_base_path_unprefixed_path_returns_404():
+    settings = _settings(base_path="/nib")
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get("/wmts/utm32/1/2/3.png")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_healthz_available_both_prefixed_and_unprefixed_with_base_path():
+    settings = _settings(base_path="/nib")
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            prefixed = await client.get("/nib/healthz")
+            unprefixed = await client.get("/healthz")
+
+    assert prefixed.status_code == 200
+    assert prefixed.json() == {"status": "ok"}
+    assert unprefixed.status_code == 200
+    assert unprefixed.json() == {"status": "ok"}
+
+
+def test_base_path_normalization():
+    from nib_proxy.config import Settings
+
+    settings = Settings(
+        nib_username="",
+        nib_password="",
+        token_url="https://example.com/token",
+        token_validity_seconds=3600,
+        cache_max_entries=10,
+        services=(),
+        base_path="nib/",
+    )
+    assert settings.base_path == "/nib"
+
+    settings_empty = Settings(
+        nib_username="",
+        nib_password="",
+        token_url="https://example.com/token",
+        token_validity_seconds=3600,
+        cache_max_entries=10,
+        services=(),
+        base_path="/",
+    )
+    assert settings_empty.base_path == ""

@@ -20,6 +20,12 @@ load on the upstream services.
   request is forwarded upstream with `X-Esri-Authorization: Bearer <token>`.
   On a `401`/`403` from upstream, the token is refreshed once and the
   request is retried.
+- CORS is enabled and configurable via `CORS_ALLOW_ORIGINS`/`CORS_ALLOW_METHODS`/
+  `CORS_ALLOW_HEADERS`/`CORS_ALLOW_CREDENTIALS` (defaults allow any origin).
+- Set `BASE_PATH` (e.g. `/nib`) to mount the proxy under a path prefix, so it
+  can be exposed as `https://host/nib/...` without needing a reverse proxy
+  that strips the prefix. `/healthz` remains available both prefixed and
+  unprefixed for infra liveness/readiness probes.
 
 ## Setup
 Install `uv`: https://docs.astral.sh/uv/getting-started/installation/

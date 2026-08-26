@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from nib_proxy.client_key import resolve_client_key
@@ -55,7 +55,13 @@ class _UpstreamTokenError(Exception):
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    """Create the FastAPI application, wiring up caches and the http client."""
+    """Create the FastAPI application, wiring up caches and the http client.
+
+    If ``settings.base_path`` is set (e.g. ``/nib``), all routes (including
+    ``/healthz``) are mounted under that prefix, so the service can be
+    exposed behind a reverse proxy path such as ``https://host/nib/...``
+    without the proxy needing to strip the prefix before forwarding.
+    """
     settings = settings or load_settings()
     token_cache = TokenCache(settings)
     response_cache = ResponseCache(max_entries=settings.cache_max_entries)
@@ -81,16 +87,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=settings.cors.allow_credentials,
     )
 
-    @app.get("/healthz")
+    router = APIRouter(prefix=settings.base_path)
+
+    @router.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.api_route(
+    @router.api_route(
         "/{full_path:path}",
         methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
     )
     async def proxy(full_path: str, request: Request) -> Response:
         return await handle_proxy_request(app, request, full_path)
+
+    app.include_router(router)
+
+    if settings.base_path:
+        # Also expose an unprefixed /healthz, since infra liveness/readiness
+        # probes often hit the container directly without knowledge of the
+        # externally-visible base path.
+        @app.get("/healthz")
+        async def healthz_root() -> dict[str, str]:
+            return {"status": "ok"}
 
     return app
 

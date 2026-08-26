@@ -70,6 +70,14 @@ class Settings:
     cache_max_entries: int
     services: tuple[ServiceConfig, ...]
     cors: CorsConfig = field(default_factory=CorsConfig)
+    base_path: str = ""
+
+    def __post_init__(self) -> None:
+        """Normalize base_path: no trailing slash, leading slash if set."""
+        base_path = self.base_path.strip().rstrip("/")
+        if base_path and not base_path.startswith("/"):
+            base_path = "/" + base_path
+        object.__setattr__(self, "base_path", base_path)
 
     def match_service(self, path: str) -> tuple[ServiceConfig, str] | None:
         """Find the service whose prefix matches the given path.
@@ -140,4 +148,5 @@ def load_settings() -> Settings:
             allow_headers=tuple(env.list("CORS_ALLOW_HEADERS", default=["*"])),
             allow_credentials=env.bool("CORS_ALLOW_CREDENTIALS", default=False),
         ),
+        base_path=env.str("BASE_PATH", default=""),
     )
