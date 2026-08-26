@@ -1,0 +1,15 @@
+# Changes here will be overwritten by Copier
+_commit: v0.3.0
+_src_path: gh:ninanor/template-python
+author_name: ninanor
+debug: false
+default_branch_name: main
+docker: true
+email: ninanor@nina.no
+notebook: false
+project_name: NiB Proxy
+project_slug: nib_proxy
+repo_name: nib_proxy
+repo_org: ninanor
+template_type: python
+type_annotations: false

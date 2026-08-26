@@ -1,0 +1,50 @@
+
+[project]
+authors = [
+  {name = "ninanor", email = "ninanor@nina.no"}
+]
+# PEP 621 project metadata
+# See https://www.python.org/dev/peps/pep-0621/
+dependencies = [
+  "django-environ",
+  "fastapi[standard]>=0.141.1",
+  "httpx>=0.27",
+  "pyyaml>=6.0",
+  "uvicorn>=0.30",
+]
+description = ""
+license = "GPL-3.0+"
+name = "nib_proxy"
+readme = "README.md"
+requires-python = ">=3.10"
+version = "0.1.0"
+
+
+[project.scripts]
+nib_proxy = "main:start"
+
+[dependency-groups]
+dev = [
+  "deptry",
+  "pytest",
+  "pytest-asyncio",
+  "respx",
+  "asgi-lifespan",
+]
+
+[tool.deptry]
+known_first_party = ["nib_proxy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+[tool.ruff]
+fix = true
+
+[tool.ruff.lint]
+ignore = ["COM812"]
+select = ["E", "W", "I", "F", "UP", "S", "B", "A", "COM", "LOG", "PTH", "Q"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
