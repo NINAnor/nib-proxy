@@ -20,6 +20,7 @@ from nib_proxy.client_key import resolve_client_key
 from nib_proxy.config import Settings, load_settings
 from nib_proxy.response_cache import ResponseCache
 from nib_proxy.token_cache import TokenCache
+from nib_proxy.token_client import TokenRequestError
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,14 @@ def _filtered_headers(headers: httpx.Headers | dict) -> dict[str, str]:
     return {
         k: v for k, v in dict(headers).items() if k.lower() not in _HOP_BY_HOP_HEADERS
     }
+
+
+class _UpstreamTokenError(Exception):
+    """Internal signal carrying a token-endpoint error response to forward."""
+
+    def __init__(self, response: httpx.Response) -> None:
+        super().__init__(f"token endpoint error: {response.status_code}")
+        self.response = response
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -110,9 +119,16 @@ async def handle_proxy_request(
     body = await request.body()
 
     async def _forward(*, force_refresh: bool) -> httpx.Response:
-        token = await token_cache.get_token(
-            http_client, client_key, force_refresh=force_refresh
-        )
+        try:
+            token = await token_cache.get_token(
+                http_client, client_key, force_refresh=force_refresh
+            )
+        except TokenRequestError as exc:
+            # Propagate the upstream token endpoint's error as-is (status,
+            # headers, body) rather than a generic 500, so failures (bad
+            # credentials, rate limits, etc.) are easy to debug directly
+            # from the source.
+            raise _UpstreamTokenError(exc.response) from exc
         upstream_url = f"{service.upstream}{sub_path}"
         headers = _filtered_headers(request.headers)
         headers["X-Esri-Authorization"] = f"Bearer {token}"
@@ -124,11 +140,18 @@ async def handle_proxy_request(
             headers=headers,
         )
 
-    upstream_response = await _forward(force_refresh=False)
+    try:
+        upstream_response = await _forward(force_refresh=False)
 
-    if upstream_response.status_code in (401, 403):
-        token_cache.invalidate(client_key)
-        upstream_response = await _forward(force_refresh=True)
+        if upstream_response.status_code in (401, 403):
+            token_cache.invalidate(client_key)
+            upstream_response = await _forward(force_refresh=True)
+    except _UpstreamTokenError as exc:
+        return Response(
+            content=exc.response.content,
+            status_code=exc.response.status_code,
+            headers=_filtered_headers(exc.response.headers),
+        )
 
     response_headers = _filtered_headers(upstream_response.headers)
 

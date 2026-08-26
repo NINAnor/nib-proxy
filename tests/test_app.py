@@ -145,3 +145,27 @@ async def test_healthz():
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_token_endpoint_error_is_propagated_verbatim():
+    settings = _settings()
+    respx.post(settings.token_url).mock(
+        return_value=httpx.Response(
+            401, json={"error": "Invalid username or password."}
+        )
+    )
+
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get("/wmts/utm32/1/2/3.png")
+
+    # The real error from the NiB token endpoint is surfaced as-is (status
+    # code and body), instead of a generic/opaque 500, to ease debugging.
+    assert response.status_code == 401
+    assert response.json() == {"error": "Invalid username or password."}

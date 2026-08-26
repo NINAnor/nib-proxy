@@ -19,7 +19,16 @@ logger = logging.getLogger(__name__)
 
 
 class TokenRequestError(RuntimeError):
-    """Raised when the NiB token endpoint fails to return a token."""
+    """Raised when the NiB token endpoint fails to return a usable token.
+
+    Carries the raw upstream response so callers can propagate it verbatim
+    (status code, headers, body) instead of masking it behind a generic 500,
+    making it straightforward to debug against the real NiB service.
+    """
+
+    def __init__(self, message: str, response: httpx.Response) -> None:
+        super().__init__(message)
+        self.response = response
 
 
 async def fetch_token(
@@ -43,10 +52,13 @@ async def fetch_token(
         data=data,
         auth=(settings.nib_username, settings.nib_password),
     )
-    response.raise_for_status()
+    if response.is_error:
+        message = f"NiB token endpoint returned {response.status_code}: {response.text}"
+        raise TokenRequestError(message, response)
+
     payload = response.json()
     token = payload.get("token")
     if not token:
         message = f"NiB token endpoint did not return a token: {payload}"
-        raise TokenRequestError(message)
+        raise TokenRequestError(message, response)
     return token
