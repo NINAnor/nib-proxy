@@ -333,3 +333,44 @@ def test_base_path_normalization():
         base_path="/",
     )
     assert settings_empty.base_path == ""
+
+
+@pytest.mark.asyncio
+async def test_list_services_returns_registry():
+    settings = _settings(cache_enabled=True)
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get("/services")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "name": "wmts-utm32",
+            "path_prefix": "/wmts/utm32",
+            "upstream": "https://tilecache.norgeibilder.no/wmts/utm32_euref89",
+            "cache": {
+                "enabled": True,
+                "ttl_seconds": 60,
+                "methods": ["GET"],
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_services_includes_base_path_in_prefix():
+    settings = _settings(base_path="/nib")
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get("/nib/services")
+
+    assert response.status_code == 200
+    assert response.json()[0]["path_prefix"] == "/nib/wmts/utm32"

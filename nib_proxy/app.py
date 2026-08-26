@@ -93,6 +93,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    @router.get("/services")
+    async def list_services() -> list[dict]:
+        """List the configured upstream services (introspection/debugging)."""
+        return [
+            {
+                "name": service.name,
+                "path_prefix": f"{settings.base_path}{service.path_prefix}",
+                "upstream": service.upstream,
+                "cache": {
+                    "enabled": service.cache.enabled,
+                    "ttl_seconds": service.cache.ttl_seconds,
+                    "methods": list(service.cache.methods),
+                },
+            }
+            for service in settings.services
+        ]
+
     @router.api_route(
         "/{full_path:path}",
         methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],

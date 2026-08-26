@@ -26,6 +26,9 @@ load on the upstream services.
   can be exposed as `https://host/nib/...` without needing a reverse proxy
   that strips the prefix. `/healthz` remains available both prefixed and
   unprefixed for infra liveness/readiness probes.
+- `GET /services` (or `GET <BASE_PATH>/services`) lists the currently
+  configured upstream services (name, effective path prefix, upstream URL,
+  and cache settings) for introspection/debugging.
 
 ## Setup
 Install `uv`: https://docs.astral.sh/uv/getting-started/installation/
