@@ -30,7 +30,36 @@ def _settings() -> Settings:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_fetch_token_sends_basic_auth_and_form_body():
+async def test_fetch_token_sends_basic_auth_and_form_body_for_referer():
+    settings = _settings()
+    route = respx.post(settings.token_url).mock(
+        return_value=httpx.Response(200, json={"token": "abc123"})
+    )
+
+    async with httpx.AsyncClient() as client:
+        cache = TokenCache(settings)
+        token = await cache.get_token(
+            client, ClientKey(mode="referer", value="example.com")
+        )
+
+    assert token == "abc123"
+    request = route.calls.last.request
+    expected_auth = "Basic " + base64.b64encode(b"user:pass").decode()
+    assert request.headers["authorization"] == expected_auth
+    body = request.content.decode()
+    assert "client=referer" in body
+    assert "referer=example.com" in body
+    assert "expiration=3600" in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_token_uses_requestip_for_ip_mode():
+    """IP-bound tokens use client=requestip: NiB auto-detects the caller's
+    IP, which will match this proxy's own egress IP on subsequent upstream
+    requests -- unlike an explicit client=ip with the original browser's IP,
+    which this proxy never actually connects from.
+    """
     settings = _settings()
     route = respx.post(settings.token_url).mock(
         return_value=httpx.Response(200, json={"token": "abc123"})
@@ -42,11 +71,10 @@ async def test_fetch_token_sends_basic_auth_and_form_body():
 
     assert token == "abc123"
     request = route.calls.last.request
-    expected_auth = "Basic " + base64.b64encode(b"user:pass").decode()
-    assert request.headers["authorization"] == expected_auth
     body = request.content.decode()
-    assert "client=ip" in body
-    assert "ip=1.2.3.4" in body
+    assert "client=requestip" in body
+    assert "ip=" not in body
+    assert "referer=" not in body
     assert "expiration=3600" in body
 
 
