@@ -137,7 +137,7 @@ def load_settings() -> Settings:
         nib_password=env.str("NIB_PASSWORD", default=""),
         token_url=env.str(
             "NIB_TOKEN_URL",
-            default="https://services.norgeibilder.no/token/tilecache",
+            default="https://backend-api.klienter-prod-k8s2.norgeibilder.no/token/tilecache",
         ),
         token_validity_seconds=env.int("TOKEN_VALIDITY_SECONDS", default=3600),
         cache_max_entries=env.int("CACHE_MAX_ENTRIES", default=5000),

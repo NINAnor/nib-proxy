@@ -2,11 +2,13 @@
 
 A FastAPI reverse proxy for the [Norge i Bilder (NiB)](https://www.geonorge.no/nib)
 WMS/WMTS services. It transparently authenticates requests against the NiB
-token endpoint using a shared GeoID credential, reuses the resulting token
-per client (HTTP `Referer`/`Origin`, falling back to the requester's IP), and
-automatically refreshes the token on expiry (default validity: 1 hour). It
-can also cache proxied responses in-memory (useful for WMTS tiles) to reduce
-load on the upstream services.
+Eksport API's token endpoint
+(https://backend-api.klienter-prod-k8s2.norgeibilder.no/swagger/v1/swagger.json,
+`POST /token/tilecache`) using a shared GeoID credential, reuses the
+resulting token per client (HTTP `Referer`/`Origin`, falling back to the
+requester's IP), and automatically refreshes the token on expiry (default
+validity: 1 hour). It can also cache proxied responses in-memory (useful for
+WMTS tiles) to reduce load on the upstream services.
 
 ## How it works
 
