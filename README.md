@@ -19,9 +19,9 @@ WMTS tiles) to reduce load on the upstream services.
   with a TTL.
 - Incoming requests are matched against `services.yaml`, a NiB token is
   fetched/cached per client key (`Referer`/`Origin` host, else IP), and the
-  request is forwarded upstream with `X-Esri-Authorization: Bearer <token>`.
-  On a `401`/`403` from upstream, the token is refreshed once and the
-  request is retried.
+  request is forwarded upstream with `?token=<token>` appended to the query
+  string. On a `401`/`403` from upstream, the token is refreshed once and
+  the request is retried.
 - CORS is enabled and configurable via `CORS_ALLOW_ORIGINS`/`CORS_ALLOW_METHODS`/
   `CORS_ALLOW_HEADERS`/`CORS_ALLOW_CREDENTIALS` (defaults allow any origin).
 - Set `BASE_PATH` (e.g. `/nib`) to mount the proxy under a path prefix, so it

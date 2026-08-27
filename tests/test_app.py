@@ -38,7 +38,7 @@ def _settings(
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_proxies_request_with_token_header():
+async def test_proxies_request_with_token_query_param():
     settings = _settings()
     respx.post(settings.token_url).mock(
         return_value=httpx.Response(200, json={"token": "tok"})
@@ -57,7 +57,7 @@ async def test_proxies_request_with_token_header():
 
     assert response.status_code == 200
     assert response.content == b"tile-bytes"
-    assert upstream.calls.last.request.headers["x-esri-authorization"] == "Bearer tok"
+    assert upstream.calls.last.request.url.params["token"] == "tok"
 
 
 @pytest.mark.asyncio
@@ -104,8 +104,8 @@ async def test_retries_with_fresh_token_on_401():
     assert response.status_code == 200
     assert response.content == b"tile-bytes"
     assert upstream_route.call_count == 2
-    last_headers = upstream_route.calls.last.request.headers
-    assert last_headers["x-esri-authorization"] == "Bearer fresh"
+    last_url = upstream_route.calls.last.request.url
+    assert last_url.params["token"] == "fresh"
 
 
 @pytest.mark.asyncio
@@ -274,7 +274,7 @@ async def test_base_path_is_used_for_routing():
 
     assert response.status_code == 200
     assert response.content == b"tile-bytes"
-    assert upstream.calls.last.request.headers["x-esri-authorization"] == "Bearer tok"
+    assert upstream.calls.last.request.url.params["token"] == "tok"
 
 
 @pytest.mark.asyncio

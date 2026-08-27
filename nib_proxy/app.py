@@ -268,19 +268,19 @@ async def handle_proxy_request(
             raise _UpstreamTokenError(exc.response) from exc
         upstream_url = f"{service.upstream}{sub_path}"
         headers = _filtered_headers(request.headers)
-        headers["X-Esri-Authorization"] = f"Bearer {token}"
+        forward_params = httpx.QueryParams(query_string).set("token", token)
         logger.debug(
-            "Forwarding %s %s%s to upstream %s using token=%s",
+            "Forwarding %s %s?%s to upstream %s using token=%s",
             method,
             upstream_url,
-            f"?{query_string}" if query_string else "",
+            forward_params,
             service.upstream,
             token,
         )
         return await http_client.request(
             method,
             upstream_url,
-            params=query_string or None,
+            params=forward_params,
             content=body or None,
             headers=headers,
         )
