@@ -10,16 +10,19 @@ which is especially useful for WMTS tile endpoints.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import cache
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from nib_proxy.client_key import resolve_client_key
-from nib_proxy.config import Settings, load_settings
+from nib_proxy.config import PASSTHROUGH_SEGMENT, ServiceConfig, Settings, load_settings
 from nib_proxy.response_cache import ResponseCache
 from nib_proxy.token_cache import TokenCache
 from nib_proxy.token_client import TokenRequestError
@@ -42,9 +45,9 @@ def _response_headers(headers: httpx.Headers | dict) -> dict[str, str]:
     }
 
 
-# Content-type prefixes/suffixes considered textual and safe to log a
-# snippet of. Anything else (images, tiles, octet-stream, etc.) is reported
-# as binary with just its size.
+# Content-type prefixes/suffixes considered textual: safe to log a preview
+# of, and eligible for upstream-URL rewriting. Anything else (images,
+# tiles, octet-stream, etc.) is left untouched.
 _TEXTUAL_CONTENT_TYPE_PREFIXES = ("text/",)
 _TEXTUAL_CONTENT_TYPE_EXACT = {
     "application/json",
@@ -57,6 +60,15 @@ _TEXTUAL_CONTENT_TYPE_SUFFIXES = ("+json", "+xml")
 _BODY_LOG_PREVIEW_LIMIT = 500
 
 
+def _is_textual_content_type(content_type: str) -> bool:
+    content_type = content_type.split(";")[0].strip().lower()
+    return (
+        content_type.startswith(_TEXTUAL_CONTENT_TYPE_PREFIXES)
+        or content_type in _TEXTUAL_CONTENT_TYPE_EXACT
+        or content_type.endswith(_TEXTUAL_CONTENT_TYPE_SUFFIXES)
+    )
+
+
 def _describe_body(headers: httpx.Headers | dict, body: bytes) -> str:
     """Summarize a response body for logging.
 
@@ -67,14 +79,8 @@ def _describe_body(headers: httpx.Headers | dict, body: bytes) -> str:
     if not body:
         return "<empty body>"
 
-    content_type = dict(headers).get("content-type", "").split(";")[0].strip().lower()
-    is_textual = (
-        content_type.startswith(_TEXTUAL_CONTENT_TYPE_PREFIXES)
-        or content_type in _TEXTUAL_CONTENT_TYPE_EXACT
-        or content_type.endswith(_TEXTUAL_CONTENT_TYPE_SUFFIXES)
-    )
-
-    if not is_textual:
+    content_type = dict(headers).get("content-type", "")
+    if not _is_textual_content_type(content_type):
         return f"<binary, {len(body)} bytes, content-type={content_type or 'unknown'}>"
 
     try:
@@ -87,6 +93,97 @@ def _describe_body(headers: httpx.Headers | dict, body: bytes) -> str:
             f"{text[:_BODY_LOG_PREVIEW_LIMIT]}... (truncated, {len(body)} bytes total)"
         )
     return text
+
+
+@cache
+def _upstream_alias_pattern(upstream: str) -> re.Pattern[str]:
+    """Build a pattern matching any scheme/port variant of an upstream URL.
+
+    Response bodies (WMS/WMTS Capabilities documents) may embed the
+    upstream's host with a different scheme (http/https) or an explicit
+    port than what's configured in ``services.yaml``, so we match on
+    host+path only, allowing any scheme and optional port.
+    """
+    parsed = urlsplit(upstream)
+    host = re.escape(parsed.hostname or "")
+    path = re.escape(parsed.path)
+    return re.compile(rf"https?://{host}(?::\d+)?{path}")
+
+
+@cache
+def _upstream_origin_pattern(origin: str) -> re.Pattern[str]:
+    """Build a pattern matching any scheme/port variant of an upstream origin.
+
+    Some upstream services (e.g. ArcGIS) embed their own *canonical* REST
+    URLs in Capabilities documents, which don't share the friendly alias
+    path configured in ``services.yaml`` at all -- only the host is
+    guaranteed to match. A negative lookahead prevents partially matching a
+    longer, unrelated hostname that happens to share this one as a prefix.
+    """
+    parsed = urlsplit(origin)
+    host = re.escape(parsed.hostname or "")
+    return re.compile(rf"https?://{host}(?::\d+)?(?![\w.:-])")
+
+
+def _rewrite_upstream_urls(
+    body: bytes,
+    headers: httpx.Headers | dict,
+    settings: Settings,
+    service: ServiceConfig,
+) -> bytes:
+    """Rewrite occurrences of the upstream's URLs in textual bodies.
+
+    WMS/WMTS Capabilities documents embed the upstream's own base URL(s)
+    for subsequent requests (e.g. GetTile/GetMap), sometimes with a
+    different scheme, an explicit port, or even a completely different
+    (but same-host) canonical path than the friendly alias configured for
+    this service. If left untouched, clients would be pointed directly at
+    the upstream, bypassing this proxy (and its authentication) entirely.
+    Only applied when ``PUBLIC_BASE_URL`` is configured, and only to
+    textual bodies.
+
+    Two passes are applied:
+    1. Exact alias matches (scheme/port-agnostic) are rewritten to this
+       service's friendly external URL.
+    2. Any remaining same-origin URLs (e.g. ArcGIS's own canonical REST
+       paths, which don't share the alias path at all) are rewritten to a
+       passthrough URL that preserves the original path, so following the
+       link still routes back through this proxy to the same upstream.
+    """
+    if not settings.public_base_url or not body:
+        return body
+
+    content_type = dict(headers).get("content-type", "")
+    if not _is_textual_content_type(content_type):
+        return body
+
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body
+
+    original_text = text
+    alias_url = settings.external_url_for(service)
+    text, alias_count = _upstream_alias_pattern(service.upstream).subn(alias_url, text)
+
+    passthrough_url = settings.external_passthrough_url_for(service)
+    text, passthrough_count = _upstream_origin_pattern(service.origin).subn(
+        passthrough_url, text
+    )
+
+    if text == original_text:
+        return body
+
+    logger.debug(
+        "Rewrote %d alias + %d passthrough occurrence(s) of upstream URLs "
+        "for %s (alias=%s, passthrough=%s)",
+        alias_count,
+        passthrough_count,
+        service.name,
+        alias_url,
+        passthrough_url,
+    )
+    return text.encode("utf-8")
 
 
 class _UpstreamTokenError(Exception):
@@ -159,6 +256,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "name": service.name,
                 "path_prefix": f"{settings.base_path}{service.path_prefix}",
                 "upstream": service.upstream,
+                "passthrough_prefix": (
+                    f"{settings.base_path}/{PASSTHROUGH_SEGMENT}/{service.name}"
+                ),
                 "cache": {
                     "enabled": service.cache.enabled,
                     "ttl_seconds": service.cache.ttl_seconds,
@@ -204,22 +304,30 @@ async def handle_proxy_request(
     if match is None:
         logger.warning("No service matches path %r (method=%s)", full_path, method)
         return Response(content="No matching service configured", status_code=404)
-    service, sub_path = match
+    service, sub_path, passthrough = (
+        match.service,
+        match.sub_path,
+        match.passthrough,
+    )
 
     query_string = str(request.url.query)
     logger.info(
-        "Request %s /%s -> service=%s sub_path=%r",
+        "Request %s /%s -> service=%s sub_path=%r%s",
         method,
         full_path,
         service.name,
         sub_path,
+        " (passthrough)" if passthrough else "",
     )
 
     cache_enabled = service.cache.enabled and method in service.cache.methods
     cache_key = None
     if cache_enabled:
         cache_key = ResponseCache.build_key(
-            service.name, method, sub_path, query_string
+            f"{service.name}{':passthrough' if passthrough else ''}",
+            method,
+            sub_path,
+            query_string,
         )
         cached = response_cache.get(cache_key)
         if cached is not None:
@@ -261,7 +369,12 @@ async def handle_proxy_request(
             # credentials, rate limits, etc.) are easy to debug directly
             # from the source.
             raise _UpstreamTokenError(exc.response) from exc
-        upstream_url = f"{service.upstream}{sub_path}"
+        # In passthrough mode, sub_path is already an absolute upstream path
+        # (rewritten from e.g. an ArcGIS canonical REST URL), so it's
+        # appended to the upstream's origin directly rather than to its
+        # configured alias path.
+        upstream_base = service.origin if passthrough else service.upstream
+        upstream_url = f"{upstream_base}{sub_path}"
         headers = dict(request.headers)
         # The inbound Host header refers to this proxy, not the upstream
         # service; forwarding it verbatim breaks virtual-host routing on
@@ -274,7 +387,7 @@ async def handle_proxy_request(
             method,
             upstream_url,
             forward_params,
-            service.upstream,
+            upstream_base,
             token,
         )
         return await http_client.request(
@@ -319,13 +432,16 @@ async def handle_proxy_request(
         )
 
     response_headers = _response_headers(upstream_response.headers)
+    response_body = _rewrite_upstream_urls(
+        upstream_response.content, response_headers, settings, service
+    )
 
     if cache_enabled and cache_key and upstream_response.status_code < 400:
         response_cache.set(
             cache_key,
             status_code=upstream_response.status_code,
             headers=response_headers,
-            body=upstream_response.content,
+            body=response_body,
             ttl_seconds=service.cache.ttl_seconds,
         )
         logger.debug(
@@ -346,11 +462,11 @@ async def handle_proxy_request(
     )
     logger.debug(
         "Response body: %s",
-        _describe_body(response_headers, upstream_response.content),
+        _describe_body(response_headers, response_body),
     )
 
     return Response(
-        content=upstream_response.content,
+        content=response_body,
         status_code=upstream_response.status_code,
         headers=response_headers,
     )

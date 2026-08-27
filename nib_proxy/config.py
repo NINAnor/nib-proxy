@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import pathlib
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 import environ
 import yaml
@@ -17,6 +18,14 @@ import yaml
 env = environ.Env()
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 environ.Env.read_env(str(BASE_DIR / ".env"))
+
+# Internal proxy path segment used for "passthrough" requests: absolute
+# upstream URLs (e.g. ArcGIS's own canonical REST paths embedded in
+# Capabilities documents, which don't share the friendly alias path
+# configured for a service) are rewritten to
+# ``{public_base_url}{base_path}/_upstream/{service.name}{original_path}``
+# so that following them still routes back through this proxy.
+PASSTHROUGH_SEGMENT = "_upstream"
 
 
 @dataclass(frozen=True)
@@ -36,11 +45,14 @@ class ServiceConfig:
     path_prefix: str
     upstream: str
     cache: CacheConfig = field(default_factory=CacheConfig)
+    origin: str = field(init=False)
 
     def __post_init__(self) -> None:
         """Normalize prefix/upstream so they don't end with a trailing slash."""
         object.__setattr__(self, "path_prefix", self.path_prefix.rstrip("/"))
         object.__setattr__(self, "upstream", self.upstream.rstrip("/"))
+        parsed = urlsplit(self.upstream)
+        object.__setattr__(self, "origin", f"{parsed.scheme}://{parsed.netloc}")
 
 
 @dataclass(frozen=True)
@@ -60,6 +72,15 @@ class CorsConfig:
 
 
 @dataclass(frozen=True)
+class RouteMatch:
+    """Result of matching an inbound path against the service registry."""
+
+    service: ServiceConfig
+    sub_path: str
+    passthrough: bool = False
+
+
+@dataclass(frozen=True)
 class Settings:
     """Global proxy settings."""
 
@@ -71,6 +92,7 @@ class Settings:
     services: tuple[ServiceConfig, ...]
     cors: CorsConfig = field(default_factory=CorsConfig)
     base_path: str = ""
+    public_base_url: str = ""
 
     def __post_init__(self) -> None:
         """Normalize base_path: no trailing slash, leading slash if set."""
@@ -78,24 +100,58 @@ class Settings:
         if base_path and not base_path.startswith("/"):
             base_path = "/" + base_path
         object.__setattr__(self, "base_path", base_path)
+        object.__setattr__(self, "public_base_url", self.public_base_url.rstrip("/"))
 
-    def match_service(self, path: str) -> tuple[ServiceConfig, str] | None:
+    def match_service(self, path: str) -> RouteMatch | None:
         """Find the service whose prefix matches the given path.
 
-        Returns a tuple of (service, remaining sub-path) or None if no
-        service matches. The longest matching prefix wins.
+        Checks friendly alias prefixes first (longest match wins). If none
+        match, also checks the internal passthrough prefix
+        (``/_upstream/<service-name>/...``) used for absolute upstream URLs
+        rewritten into response bodies (see ``external_passthrough_url_for``).
+        Returns ``None`` if nothing matches.
         """
         path = "/" + path.lstrip("/")
+
         best: ServiceConfig | None = None
         for service in self.services:
             prefix = service.path_prefix
             if path == prefix or path.startswith(prefix + "/"):
                 if best is None or len(service.path_prefix) > len(best.path_prefix):
                     best = service
-        if best is None:
-            return None
-        sub_path = path[len(best.path_prefix) :]
-        return best, sub_path
+        if best is not None:
+            sub_path = path[len(best.path_prefix) :]
+            return RouteMatch(service=best, sub_path=sub_path)
+
+        for service in self.services:
+            prefix = f"/{PASSTHROUGH_SEGMENT}/{service.name}"
+            if path == prefix or path.startswith(prefix + "/"):
+                sub_path = path[len(prefix) :]
+                return RouteMatch(service=service, sub_path=sub_path, passthrough=True)
+
+        return None
+
+    def external_url_for(self, service: ServiceConfig) -> str:
+        """Return the externally-visible alias URL for a service.
+
+        Used to rewrite occurrences of the service's own alias path found
+        in response bodies, so clients keep talking to this proxy for
+        subsequent requests instead of bypassing it.
+        """
+        return f"{self.public_base_url}{self.base_path}{service.path_prefix}"
+
+    def external_passthrough_url_for(self, service: ServiceConfig) -> str:
+        """Return the externally-visible passthrough URL for a service.
+
+        Used to rewrite occurrences of the service's upstream *origin*
+        (regardless of path) found in response bodies -- e.g. ArcGIS's own
+        canonical REST URLs embedded in Capabilities documents, which don't
+        share the service's configured alias path at all.
+        """
+        return (
+            f"{self.public_base_url}{self.base_path}"
+            f"/{PASSTHROUGH_SEGMENT}/{service.name}"
+        )
 
 
 def _load_services(config_path: pathlib.Path) -> tuple[ServiceConfig, ...]:
@@ -149,4 +205,5 @@ def load_settings() -> Settings:
             allow_credentials=env.bool("CORS_ALLOW_CREDENTIALS", default=False),
         ),
         base_path=env.str("BASE_PATH", default=""),
+        public_base_url=env.str("PUBLIC_BASE_URL", default=""),
     )

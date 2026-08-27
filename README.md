@@ -30,7 +30,19 @@ WMTS tiles) to reduce load on the upstream services.
   unprefixed for infra liveness/readiness probes.
 - `GET /services` (or `GET <BASE_PATH>/services`) lists the currently
   configured upstream services (name, effective path prefix, upstream URL,
-  and cache settings) for introspection/debugging.
+  passthrough prefix, and cache settings) for introspection/debugging.
+- Set `PUBLIC_BASE_URL` (e.g. `https://example.org`) to rewrite upstream
+  base URLs found in textual response bodies (WMS/WMTS Capabilities
+  documents) to point back at this proxy instead, so clients keep going
+  through it (and its authentication) for subsequent requests instead of
+  bypassing it. Two kinds of URLs are rewritten:
+  - Exact matches of a service's configured alias (any scheme/port variant)
+    are rewritten to that service's friendly external URL.
+  - Any other same-origin URL (e.g. ArcGIS's own canonical REST paths,
+    which some upstreams embed regardless of which alias was used to fetch
+    the document) is rewritten to a passthrough URL
+    (`<PUBLIC_BASE_URL><BASE_PATH>/_upstream/<service-name>/<original-path>`)
+    that, when followed, forwards to the exact same upstream path/host.
 
 ## Setup
 Install `uv`: https://docs.astral.sh/uv/getting-started/installation/
