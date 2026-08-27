@@ -1,5 +1,7 @@
 """Integration-style tests for the proxy app (routing, auth, caching)."""
 
+import gzip
+
 import httpx
 import pytest
 import respx
@@ -584,3 +586,72 @@ def test_describe_body_helper_directly():
         _describe_body({"content-type": "text/plain"}, b"\xff\xfe")
         == "<binary, 2 bytes, content-type=text/plain>"
     )
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_inbound_host_header_is_not_forwarded_upstream():
+    """The client's Host header refers to this proxy, not the upstream.
+
+    Forwarding it verbatim breaks virtual-host routing on the upstream's
+    end (observed as a generic nginx 404 in production).
+    """
+    settings = _settings()
+    respx.post(settings.token_url).mock(
+        return_value=httpx.Response(200, json={"token": "tok"})
+    )
+    upstream = respx.get(
+        "https://tilecache.norgeibilder.no/wmts/utm32_euref89/1/2/3.png"
+    ).mock(return_value=httpx.Response(200, content=b"tile-bytes"))
+
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get(
+                "/wmts/utm32/1/2/3.png", headers={"host": "testserver"}
+            )
+
+    assert response.status_code == 200
+    forwarded_host = upstream.calls.last.request.headers["host"]
+    assert forwarded_host == "tilecache.norgeibilder.no"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_upstream_content_encoding_and_length_are_not_forwarded():
+    """httpx transparently decompresses responses, so response.content is
+    already decoded. Forwarding the original Content-Encoding/Content-Length
+    headers would tell the client the body is still compressed at its
+    original (compressed) length, corrupting the response.
+    """
+    settings = _settings()
+    respx.post(settings.token_url).mock(
+        return_value=httpx.Response(200, json={"token": "tok"})
+    )
+    compressed = gzip.compress(b"decoded-body")
+    respx.get("https://tilecache.norgeibilder.no/wmts/utm32_euref89/1/2/3.png").mock(
+        return_value=httpx.Response(
+            200,
+            content=compressed,
+            headers={
+                "content-encoding": "gzip",
+                "content-length": str(len(compressed)),
+            },
+        )
+    )
+
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get("/wmts/utm32/1/2/3.png")
+
+    assert response.status_code == 200
+    assert response.content == b"decoded-body"
+    assert "content-encoding" not in response.headers
+    assert response.headers["content-length"] == str(len(b"decoded-body"))

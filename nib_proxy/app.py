@@ -26,6 +26,21 @@ from nib_proxy.token_client import TokenRequestError
 
 logger = logging.getLogger(__name__)
 
+# httpx transparently decompresses responses (based on Content-Encoding), so
+# `response.content` is already decoded. If we forwarded the original
+# Content-Encoding/Content-Length headers as-is, the client would be told
+# the body is still gzip-compressed at its original length, corrupting the
+# response. These must be dropped/recomputed, not forwarded verbatim.
+_RESPONSE_HEADERS_TO_DROP = {"content-encoding", "content-length"}
+
+
+def _response_headers(headers: httpx.Headers | dict) -> dict[str, str]:
+    return {
+        k: v
+        for k, v in dict(headers).items()
+        if k.lower() not in _RESPONSE_HEADERS_TO_DROP
+    }
+
 
 # Content-type prefixes/suffixes considered textual and safe to log a
 # snippet of. Anything else (images, tiles, octet-stream, etc.) is reported
@@ -248,6 +263,11 @@ async def handle_proxy_request(
             raise _UpstreamTokenError(exc.response) from exc
         upstream_url = f"{service.upstream}{sub_path}"
         headers = dict(request.headers)
+        # The inbound Host header refers to this proxy, not the upstream
+        # service; forwarding it verbatim breaks virtual-host routing on
+        # the upstream's end (it returns a generic 404). Let httpx set the
+        # correct Host for the upstream URL instead.
+        headers.pop("host", None)
         forward_params = httpx.QueryParams(query_string).set("token", token)
         logger.debug(
             "Forwarding %s %s?%s to upstream %s using token=%s",
@@ -295,10 +315,10 @@ async def handle_proxy_request(
         return Response(
             content=exc.response.content,
             status_code=exc.response.status_code,
-            headers=dict(exc.response.headers),
+            headers=_response_headers(exc.response.headers),
         )
 
-    response_headers = dict(upstream_response.headers)
+    response_headers = _response_headers(upstream_response.headers)
 
     if cache_enabled and cache_key and upstream_response.status_code < 400:
         response_cache.set(
