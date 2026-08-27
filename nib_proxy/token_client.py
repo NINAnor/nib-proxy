@@ -70,6 +70,12 @@ async def fetch_token(
         # subsequent upstream tile requests. See module docstring.
         data["client"] = "requestip"
 
+    logger.info(
+        "Requesting NiB token: client=%s (cache_key=%s), expiration=%ds",
+        data["client"],
+        client_key.cache_key,
+        settings.token_validity_seconds,
+    )
     response = await client.post(
         settings.token_url,
         data=data,
@@ -77,11 +83,29 @@ async def fetch_token(
     )
     if response.is_error:
         message = f"NiB token endpoint returned {response.status_code}: {response.text}"
+        logger.warning(
+            "NiB token request failed for %s: %d %s",
+            client_key.cache_key,
+            response.status_code,
+            response.text,
+        )
         raise TokenRequestError(message, response)
 
     payload = response.json()
     token = payload.get("token")
     if not token:
         message = f"NiB token endpoint did not return a token: {payload}"
+        logger.warning(
+            "NiB token endpoint returned no token for %s: %s",
+            client_key.cache_key,
+            payload,
+        )
         raise TokenRequestError(message, response)
+
+    logger.info(
+        "Obtained NiB token for %s (token=%s..., length=%d)",
+        client_key.cache_key,
+        token[:6],
+        len(token),
+    )
     return token

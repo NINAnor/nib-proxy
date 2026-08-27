@@ -14,7 +14,18 @@ environ.Env.read_env(str(BASE_DIR / ".env"))
 
 DEBUG = env.bool("DEBUG", default=False)
 
-logging.basicConfig(level=(logging.DEBUG if DEBUG else logging.INFO))
+logging.basicConfig(
+    level=(logging.DEBUG if DEBUG else logging.INFO),
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+)
+
+# httpx/httpcore are very chatty at DEBUG; keep them at INFO unless
+# explicitly requested via LOG_LEVEL_HTTPX, to avoid drowning out our own
+# request/token/cache logs.
+if DEBUG:
+    httpx_log_level = env.str("LOG_LEVEL_HTTPX", default="INFO")
+    logging.getLogger("httpx").setLevel(httpx_log_level)
+    logging.getLogger("httpcore").setLevel(httpx_log_level)
 
 logger = logging.getLogger(__name__)
 

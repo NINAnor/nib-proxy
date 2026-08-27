@@ -10,6 +10,7 @@ which is especially useful for WMTS tile endpoints.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -66,13 +67,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     token_cache = TokenCache(settings)
     response_cache = ResponseCache(max_entries=settings.cache_max_entries)
 
+    logger.info(
+        "Loaded %d configured service(s): %s",
+        len(settings.services),
+        ", ".join(s.name for s in settings.services) or "none",
+    )
+    if settings.base_path:
+        logger.info("Serving under base path %r", settings.base_path)
+    if not settings.nib_username or not settings.nib_password:
+        logger.warning(
+            "NIB_USERNAME/NIB_PASSWORD are not set; requests to the token "
+            "endpoint will fail authentication."
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.http_client = httpx.AsyncClient(timeout=30.0)
+        logger.info("NiB proxy startup complete")
         try:
             yield
         finally:
             await app.state.http_client.aclose()
+            logger.info("NiB proxy shutdown complete")
 
     app = FastAPI(title="NiB Proxy", lifespan=lifespan)
     app.state.settings = settings
@@ -139,27 +155,51 @@ async def handle_proxy_request(
     response_cache: ResponseCache = app.state.response_cache
     http_client: httpx.AsyncClient = app.state.http_client
 
+    start = time.monotonic()
+    method = request.method
+
     match = settings.match_service(full_path)
     if match is None:
+        logger.warning("No service matches path %r (method=%s)", full_path, method)
         return Response(content="No matching service configured", status_code=404)
     service, sub_path = match
 
     query_string = str(request.url.query)
-    cache_enabled = service.cache.enabled and request.method in service.cache.methods
+    logger.info(
+        "Request %s /%s -> service=%s sub_path=%r",
+        method,
+        full_path,
+        service.name,
+        sub_path,
+    )
+
+    cache_enabled = service.cache.enabled and method in service.cache.methods
     cache_key = None
     if cache_enabled:
         cache_key = ResponseCache.build_key(
-            service.name, request.method, sub_path, query_string
+            service.name, method, sub_path, query_string
         )
         cached = response_cache.get(cache_key)
         if cached is not None:
+            logger.info(
+                "Cache HIT for %s (key=%r), skipping token+upstream call",
+                service.name,
+                cache_key,
+            )
             return Response(
                 content=cached.body,
                 status_code=cached.status_code,
                 headers=cached.headers,
             )
+        logger.debug("Cache MISS for %s (key=%r)", service.name, cache_key)
 
     client_key = resolve_client_key(request)
+    logger.debug(
+        "Resolved client key mode=%s value=%s for %s",
+        client_key.mode,
+        client_key.value,
+        service.name,
+    )
     body = await request.body()
 
     async def _forward(*, force_refresh: bool) -> httpx.Response:
@@ -168,6 +208,12 @@ async def handle_proxy_request(
                 http_client, client_key, force_refresh=force_refresh
             )
         except TokenRequestError as exc:
+            logger.error(
+                "Token acquisition failed for %s (client=%s): %s",
+                service.name,
+                client_key.cache_key,
+                exc,
+            )
             # Propagate the upstream token endpoint's error as-is (status,
             # headers, body) rather than a generic 500, so failures (bad
             # credentials, rate limits, etc.) are easy to debug directly
@@ -176,8 +222,15 @@ async def handle_proxy_request(
         upstream_url = f"{service.upstream}{sub_path}"
         headers = _filtered_headers(request.headers)
         headers["X-Esri-Authorization"] = f"Bearer {token}"
+        logger.debug(
+            "Forwarding %s %s%s to upstream %s",
+            method,
+            upstream_url,
+            f"?{query_string}" if query_string else "",
+            service.upstream,
+        )
         return await http_client.request(
-            request.method,
+            method,
             upstream_url,
             params=query_string or None,
             content=body or None,
@@ -188,9 +241,25 @@ async def handle_proxy_request(
         upstream_response = await _forward(force_refresh=False)
 
         if upstream_response.status_code in (401, 403):
+            logger.warning(
+                "Upstream %s returned %d for %s (client=%s); "
+                "invalidating token and retrying once",
+                service.name,
+                upstream_response.status_code,
+                full_path,
+                client_key.cache_key,
+            )
             token_cache.invalidate(client_key)
             upstream_response = await _forward(force_refresh=True)
     except _UpstreamTokenError as exc:
+        elapsed_ms = (time.monotonic() - start) * 1000
+        logger.info(
+            "Request %s /%s failed at token stage: %d (%.1f ms)",
+            method,
+            full_path,
+            exc.response.status_code,
+            elapsed_ms,
+        )
         return Response(
             content=exc.response.content,
             status_code=exc.response.status_code,
@@ -207,6 +276,22 @@ async def handle_proxy_request(
             body=upstream_response.content,
             ttl_seconds=service.cache.ttl_seconds,
         )
+        logger.debug(
+            "Cached response for %s (key=%r, ttl=%ds)",
+            service.name,
+            cache_key,
+            service.cache.ttl_seconds,
+        )
+
+    elapsed_ms = (time.monotonic() - start) * 1000
+    logger.info(
+        "Request %s /%s -> %d (%.1f ms, service=%s)",
+        method,
+        full_path,
+        upstream_response.status_code,
+        elapsed_ms,
+        service.name,
+    )
 
     return Response(
         content=upstream_response.content,

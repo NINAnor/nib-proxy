@@ -8,9 +8,12 @@ on which token was used to fetch them.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,6 +42,7 @@ class ResponseCache:
             return None
         if entry.expires_at <= time.monotonic():
             del self._entries[key]
+            logger.debug("Response cache entry expired for key=%r", key)
             return None
         # Mark as recently used.
         self._entries.move_to_end(key)
@@ -61,7 +65,12 @@ class ResponseCache:
         )
         self._entries.move_to_end(key)
         while len(self._entries) > self._max_entries:
-            self._entries.popitem(last=False)
+            evicted_key, _ = self._entries.popitem(last=False)
+            logger.debug(
+                "Response cache evicted LRU entry key=%r (max_entries=%d)",
+                evicted_key,
+                self._max_entries,
+            )
 
     def __len__(self) -> int:
         return len(self._entries)

@@ -9,6 +9,7 @@ token fetches, and expired/invalid tokens can be force-refreshed on demand
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 
@@ -17,6 +18,8 @@ import httpx
 from nib_proxy.client_key import ClientKey
 from nib_proxy.config import Settings
 from nib_proxy.token_client import fetch_token
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,7 +46,8 @@ class TokenCache:
 
     def invalidate(self, client_key: ClientKey) -> None:
         """Drop the cached token for a client key, forcing a refresh next time."""
-        self._entries.pop(client_key.cache_key, None)
+        if self._entries.pop(client_key.cache_key, None) is not None:
+            logger.info("Invalidated cached token for %s", client_key.cache_key)
 
     async def get_token(
         self,
@@ -58,6 +62,7 @@ class TokenCache:
         if not force_refresh:
             cached = self._entries.get(key)
             if cached and cached.expires_at > time.monotonic():
+                logger.debug("Token cache HIT for %s", key)
                 return cached.token
 
         async with self._lock_for(key):
@@ -66,8 +71,14 @@ class TokenCache:
             if not force_refresh:
                 cached = self._entries.get(key)
                 if cached and cached.expires_at > time.monotonic():
+                    logger.debug("Token cache HIT for %s (after waiting for lock)", key)
                     return cached.token
 
+            logger.info(
+                "Token cache MISS%s for %s, fetching a new token",
+                " (forced refresh)" if force_refresh else "",
+                key,
+            )
             token = await fetch_token(http_client, self._settings, client_key)
             expires_at = (
                 time.monotonic()

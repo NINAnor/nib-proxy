@@ -435,3 +435,62 @@ async def test_cache_key_distinguishes_different_query_strings():
     assert response_b.content == b"style-b"
     assert response_a_again.content == b"style-a"
     assert upstream.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_logs_request_lifecycle_without_leaking_secrets(caplog):
+    settings = _settings(cache_enabled=True)
+    respx.post(settings.token_url).mock(
+        return_value=httpx.Response(200, json={"token": "super-secret-token-value"})
+    )
+    respx.get("https://tilecache.norgeibilder.no/wmts/utm32_euref89/1/2/3.png").mock(
+        return_value=httpx.Response(200, content=b"tile-bytes")
+    )
+
+    app = create_app(settings)
+    with caplog.at_level("DEBUG", logger="nib_proxy"):
+        async with LifespanManager(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                response = await client.get("/wmts/utm32/1/2/3.png")
+
+    assert response.status_code == 200
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+
+    # Key lifecycle events are logged.
+    assert "wmts-utm32" in messages
+    assert "Cache MISS" in messages
+    assert "Requesting NiB token" in messages
+    assert "Request GET /wmts/utm32/1/2/3.png -> 200" in messages
+
+    # The real GeoID credentials and the full token value are never logged.
+    assert "pass" not in messages
+    assert "super-secret-token-value" not in messages
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_logs_token_error_with_real_upstream_message(caplog):
+    settings = _settings()
+    respx.post(settings.token_url).mock(
+        return_value=httpx.Response(
+            401, json={"error": "Invalid username or password."}
+        )
+    )
+
+    app = create_app(settings)
+    with caplog.at_level("INFO", logger="nib_proxy"):
+        async with LifespanManager(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                response = await client.get("/wmts/utm32/1/2/3.png")
+
+    assert response.status_code == 401
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Token acquisition failed" in messages
+    assert "Invalid username or password" in messages
