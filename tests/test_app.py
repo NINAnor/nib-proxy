@@ -374,3 +374,64 @@ async def test_list_services_includes_base_path_in_prefix():
 
     assert response.status_code == 200
     assert response.json()[0]["path_prefix"] == "/nib/wmts/utm32"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_query_string_is_forwarded_to_upstream():
+    settings = _settings()
+    respx.post(settings.token_url).mock(
+        return_value=httpx.Response(200, json={"token": "tok"})
+    )
+    upstream = respx.get(
+        "https://tilecache.norgeibilder.no/wmts/utm32_euref89/1/2/3.png"
+    ).mock(return_value=httpx.Response(200, content=b"tile-bytes"))
+
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get(
+                "/wmts/utm32/1/2/3.png?service=WMTS&request=GetTile&style=default"
+            )
+
+    assert response.status_code == 200
+    forwarded_url = upstream.calls.last.request.url
+    assert forwarded_url.params["service"] == "WMTS"
+    assert forwarded_url.params["request"] == "GetTile"
+    assert forwarded_url.params["style"] == "default"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cache_key_distinguishes_different_query_strings():
+    settings = _settings(cache_enabled=True)
+    respx.post(settings.token_url).mock(
+        return_value=httpx.Response(200, json={"token": "tok"})
+    )
+    upstream = respx.get(
+        url__regex=r"https://tilecache\.norgeibilder\.no/wmts/utm32_euref89/tile\.png"
+    ).mock(
+        side_effect=[
+            httpx.Response(200, content=b"style-a"),
+            httpx.Response(200, content=b"style-b"),
+        ]
+    )
+
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response_a = await client.get("/wmts/utm32/tile.png?style=a")
+            response_b = await client.get("/wmts/utm32/tile.png?style=b")
+            # Repeat first request: should hit cache, not upstream again.
+            response_a_again = await client.get("/wmts/utm32/tile.png?style=a")
+
+    assert response_a.content == b"style-a"
+    assert response_b.content == b"style-b"
+    assert response_a_again.content == b"style-a"
+    assert upstream.call_count == 2
