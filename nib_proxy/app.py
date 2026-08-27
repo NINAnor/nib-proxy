@@ -26,26 +26,6 @@ from nib_proxy.token_client import TokenRequestError
 
 logger = logging.getLogger(__name__)
 
-# Headers that must not be blindly forwarded between proxy <-> upstream.
-_HOP_BY_HOP_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-    "host",
-    "content-length",
-}
-
-
-def _filtered_headers(headers: httpx.Headers | dict) -> dict[str, str]:
-    return {
-        k: v for k, v in dict(headers).items() if k.lower() not in _HOP_BY_HOP_HEADERS
-    }
-
 
 # Content-type prefixes/suffixes considered textual and safe to log a
 # snippet of. Anything else (images, tiles, octet-stream, etc.) is reported
@@ -267,7 +247,7 @@ async def handle_proxy_request(
             # from the source.
             raise _UpstreamTokenError(exc.response) from exc
         upstream_url = f"{service.upstream}{sub_path}"
-        headers = _filtered_headers(request.headers)
+        headers = dict(request.headers)
         forward_params = httpx.QueryParams(query_string).set("token", token)
         logger.debug(
             "Forwarding %s %s?%s to upstream %s using token=%s",
@@ -315,10 +295,10 @@ async def handle_proxy_request(
         return Response(
             content=exc.response.content,
             status_code=exc.response.status_code,
-            headers=_filtered_headers(exc.response.headers),
+            headers=dict(exc.response.headers),
         )
 
-    response_headers = _filtered_headers(upstream_response.headers)
+    response_headers = dict(upstream_response.headers)
 
     if cache_enabled and cache_key and upstream_response.status_code < 400:
         response_cache.set(
