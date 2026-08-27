@@ -439,7 +439,7 @@ async def test_cache_key_distinguishes_different_query_strings():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_logs_request_lifecycle_without_leaking_secrets(caplog):
+async def test_logs_request_lifecycle_including_token(caplog):
     settings = _settings(cache_enabled=True)
     respx.post(settings.token_url).mock(
         return_value=httpx.Response(200, json={"token": "super-secret-token-value"})
@@ -466,9 +466,10 @@ async def test_logs_request_lifecycle_without_leaking_secrets(caplog):
     assert "Requesting NiB token" in messages
     assert "Request GET /wmts/utm32/1/2/3.png -> 200" in messages
 
-    # The real GeoID credentials and the full token value are never logged.
+    # The token itself is logged (both on acquisition and when forwarding),
+    # to aid debugging -- but GeoID credentials never are.
+    assert "super-secret-token-value" in messages
     assert "pass" not in messages
-    assert "super-secret-token-value" not in messages
 
 
 @pytest.mark.asyncio
@@ -494,3 +495,92 @@ async def test_logs_token_error_with_real_upstream_message(caplog):
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "Token acquisition failed" in messages
     assert "Invalid username or password" in messages
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_logs_textual_response_body_preview(caplog):
+    settings = _settings()
+    respx.post(settings.token_url).mock(
+        return_value=httpx.Response(200, json={"token": "tok"})
+    )
+    respx.get("https://tilecache.norgeibilder.no/wmts/utm32_euref89/1/2/3.png").mock(
+        return_value=httpx.Response(
+            200,
+            content=b'{"error": "not found"}',
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    app = create_app(settings)
+    with caplog.at_level("DEBUG", logger="nib_proxy"):
+        async with LifespanManager(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                await client.get("/wmts/utm32/1/2/3.png")
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert '{"error": "not found"}' in messages
+    assert "<binary" not in messages
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_logs_binary_response_body_as_indication_only(caplog):
+    settings = _settings()
+    respx.post(settings.token_url).mock(
+        return_value=httpx.Response(200, json={"token": "tok"})
+    )
+    binary_body = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+    respx.get("https://tilecache.norgeibilder.no/wmts/utm32_euref89/1/2/3.png").mock(
+        return_value=httpx.Response(
+            200, content=binary_body, headers={"content-type": "image/png"}
+        )
+    )
+
+    app = create_app(settings)
+    with caplog.at_level("DEBUG", logger="nib_proxy"):
+        async with LifespanManager(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                await client.get("/wmts/utm32/1/2/3.png")
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert f"<binary, {len(binary_body)} bytes, content-type=image/png>" in messages
+    # Raw binary bytes must never be dumped into the logs.
+    assert "\x89PNG" not in messages
+
+
+def test_describe_body_helper_directly():
+    from nib_proxy.app import _describe_body
+
+    assert _describe_body({}, b"") == "<empty body>"
+
+    assert (
+        _describe_body({"content-type": "text/plain"}, b"hello world") == "hello world"
+    )
+
+    assert (
+        _describe_body({"content-type": "application/json"}, b'{"a": 1}') == '{"a": 1}'
+    )
+
+    long_text = "x" * 1000
+    result = _describe_body({"content-type": "text/plain"}, long_text.encode())
+    assert result.startswith("x" * 500)
+    assert "truncated" in result
+
+    assert (
+        _describe_body({"content-type": "application/octet-stream"}, b"\x00\x01\x02")
+        == "<binary, 3 bytes, content-type=application/octet-stream>"
+    )
+
+    # Bytes that fail utf-8 decoding are treated as binary even with a
+    # "textual" content-type.
+    assert (
+        _describe_body({"content-type": "text/plain"}, b"\xff\xfe")
+        == "<binary, 2 bytes, content-type=text/plain>"
+    )

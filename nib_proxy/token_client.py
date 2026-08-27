@@ -103,9 +103,8 @@ async def fetch_token(
         raise TokenRequestError(message, response)
 
     logger.info(
-        "Obtained NiB token for %s (token=%s..., length=%d)",
+        "Obtained NiB token for %s: %s",
         client_key.cache_key,
-        token[:6],
-        len(token),
+        token,
     )
     return token

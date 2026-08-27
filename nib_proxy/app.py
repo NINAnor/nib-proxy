@@ -47,6 +47,53 @@ def _filtered_headers(headers: httpx.Headers | dict) -> dict[str, str]:
     }
 
 
+# Content-type prefixes/suffixes considered textual and safe to log a
+# snippet of. Anything else (images, tiles, octet-stream, etc.) is reported
+# as binary with just its size.
+_TEXTUAL_CONTENT_TYPE_PREFIXES = ("text/",)
+_TEXTUAL_CONTENT_TYPE_EXACT = {
+    "application/json",
+    "application/xml",
+    "application/problem+json",
+    "application/x-www-form-urlencoded",
+}
+_TEXTUAL_CONTENT_TYPE_SUFFIXES = ("+json", "+xml")
+
+_BODY_LOG_PREVIEW_LIMIT = 500
+
+
+def _describe_body(headers: httpx.Headers | dict, body: bytes) -> str:
+    """Summarize a response body for logging.
+
+    Returns a short text preview if the content-type looks textual, or a
+    ``<binary, N bytes>`` indicator otherwise, so we never dump raw tile
+    images/binary payloads into the logs.
+    """
+    if not body:
+        return "<empty body>"
+
+    content_type = dict(headers).get("content-type", "").split(";")[0].strip().lower()
+    is_textual = (
+        content_type.startswith(_TEXTUAL_CONTENT_TYPE_PREFIXES)
+        or content_type in _TEXTUAL_CONTENT_TYPE_EXACT
+        or content_type.endswith(_TEXTUAL_CONTENT_TYPE_SUFFIXES)
+    )
+
+    if not is_textual:
+        return f"<binary, {len(body)} bytes, content-type={content_type or 'unknown'}>"
+
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return f"<binary, {len(body)} bytes, content-type={content_type or 'unknown'}>"
+
+    if len(text) > _BODY_LOG_PREVIEW_LIMIT:
+        return (
+            f"{text[:_BODY_LOG_PREVIEW_LIMIT]}... (truncated, {len(body)} bytes total)"
+        )
+    return text
+
+
 class _UpstreamTokenError(Exception):
     """Internal signal carrying a token-endpoint error response to forward."""
 
@@ -223,11 +270,12 @@ async def handle_proxy_request(
         headers = _filtered_headers(request.headers)
         headers["X-Esri-Authorization"] = f"Bearer {token}"
         logger.debug(
-            "Forwarding %s %s%s to upstream %s",
+            "Forwarding %s %s%s to upstream %s using token=%s",
             method,
             upstream_url,
             f"?{query_string}" if query_string else "",
             service.upstream,
+            token,
         )
         return await http_client.request(
             method,
@@ -260,6 +308,10 @@ async def handle_proxy_request(
             exc.response.status_code,
             elapsed_ms,
         )
+        logger.debug(
+            "Token endpoint response body: %s",
+            _describe_body(exc.response.headers, exc.response.content),
+        )
         return Response(
             content=exc.response.content,
             status_code=exc.response.status_code,
@@ -291,6 +343,10 @@ async def handle_proxy_request(
         upstream_response.status_code,
         elapsed_ms,
         service.name,
+    )
+    logger.debug(
+        "Response body: %s",
+        _describe_body(response_headers, upstream_response.content),
     )
 
     return Response(
