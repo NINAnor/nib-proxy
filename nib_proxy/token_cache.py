@@ -1,9 +1,12 @@
-"""Async cache for NiB tokens, keyed by client key.
+"""Async cache for the single, shared NiB token used by this proxy.
 
-Tokens have a default validity of 1 hour (configurable). A per-key lock
-ensures concurrent requests from the same origin/IP don't trigger duplicate
-token fetches, and expired/invalid tokens can be force-refreshed on demand
-(e.g. after an upstream 401/403).
+Since tokens are always requested with ``client=requestip`` (bound to this
+proxy's own egress IP, which is the same for every request it makes
+upstream regardless of which client/origin is calling it), a single shared
+token suffices -- there's no need to partition it per caller. Tokens have a
+default validity of 1 hour (configurable). A lock ensures concurrent
+requests don't trigger duplicate token fetches, and the cached token can be
+force-refreshed on demand (e.g. after an upstream 401/403).
 """
 
 from __future__ import annotations
@@ -15,7 +18,6 @@ from dataclasses import dataclass
 
 import httpx
 
-from nib_proxy.client_key import ClientKey
 from nib_proxy.config import Settings
 from nib_proxy.token_client import fetch_token
 
@@ -29,61 +31,55 @@ class _CachedToken:
 
 
 class TokenCache:
-    """In-memory token cache with per-key locking and forced refresh."""
+    """In-memory cache for the single shared NiB token."""
 
     def __init__(self, settings: Settings, safety_margin_seconds: int = 30) -> None:
         self._settings = settings
         self._safety_margin = safety_margin_seconds
-        self._entries: dict[str, _CachedToken] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._entry: _CachedToken | None = None
+        self._lock = asyncio.Lock()
 
-    def _lock_for(self, key: str) -> asyncio.Lock:
-        lock = self._locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._locks[key] = lock
-        return lock
-
-    def invalidate(self, client_key: ClientKey) -> None:
-        """Drop the cached token for a client key, forcing a refresh next time."""
-        if self._entries.pop(client_key.cache_key, None) is not None:
-            logger.info("Invalidated cached token for %s", client_key.cache_key)
+    def invalidate(self) -> None:
+        """Drop the cached token, forcing a refresh next time."""
+        if self._entry is not None:
+            self._entry = None
+            logger.info("Invalidated cached NiB token")
 
     async def get_token(
         self,
         http_client: httpx.AsyncClient,
-        client_key: ClientKey,
         *,
         force_refresh: bool = False,
     ) -> str:
-        """Return a valid token for the client key, fetching one if needed."""
-        key = client_key.cache_key
+        """Return a valid token, fetching one if needed."""
+        if (
+            not force_refresh
+            and self._entry
+            and self._entry.expires_at > time.monotonic()
+        ):
+            logger.debug("Token cache HIT")
+            return self._entry.token
 
-        if not force_refresh:
-            cached = self._entries.get(key)
-            if cached and cached.expires_at > time.monotonic():
-                logger.debug("Token cache HIT for %s", key)
-                return cached.token
-
-        async with self._lock_for(key):
+        async with self._lock:
             # Re-check after acquiring the lock: another task may have
             # already refreshed the token while we were waiting.
-            if not force_refresh:
-                cached = self._entries.get(key)
-                if cached and cached.expires_at > time.monotonic():
-                    logger.debug("Token cache HIT for %s (after waiting for lock)", key)
-                    return cached.token
+            if (
+                not force_refresh
+                and self._entry
+                and self._entry.expires_at > time.monotonic()
+            ):
+                logger.debug("Token cache HIT (after waiting for lock)")
+                return self._entry.token
 
             logger.info(
-                "Token cache MISS%s for %s, fetching a new token",
+                "Token cache MISS%s, fetching a new token",
                 " (forced refresh)" if force_refresh else "",
-                key,
             )
-            token = await fetch_token(http_client, self._settings, client_key)
+            token = await fetch_token(http_client, self._settings)
             expires_at = (
                 time.monotonic()
                 + self._settings.token_validity_seconds
                 - self._safety_margin
             )
-            self._entries[key] = _CachedToken(token=token, expires_at=expires_at)
+            self._entry = _CachedToken(token=token, expires_at=expires_at)
             return token

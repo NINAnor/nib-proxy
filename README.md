@@ -4,10 +4,10 @@ A FastAPI reverse proxy for the [Norge i Bilder (NiB)](https://www.geonorge.no/n
 WMS/WMTS services. It transparently authenticates requests against the NiB
 Eksport API's token endpoint
 (https://backend-api.klienter-prod-k8s2.norgeibilder.no/swagger/v1/swagger.json,
-`POST /token/tilecache`) using a shared GeoID credential, reuses the
-resulting token per client (HTTP `Referer`/`Origin`, falling back to the
-requester's IP), and automatically refreshes the token on expiry (default
-validity: 1 hour).
+`POST /token/tilecache`) using a shared GeoID credential, reuses a single
+shared token (bound to this proxy's own request IP via `client=requestip`,
+auto-detected by the upstream), and automatically refreshes the token on
+expiry (default validity: 1 hour).
 
 ## How it works
 
@@ -15,11 +15,12 @@ validity: 1 hour).
 - Configure the proxied services in `services.yaml` — no code changes needed
   to add/remove upstream services. Each entry maps a `path_prefix` on the
   proxy to an `upstream` base URL.
-- Incoming requests are matched against `services.yaml`, a NiB token is
-  fetched/cached per client key (`Referer`/`Origin` host, else IP), and the
-  request is forwarded upstream with `?token=<token>` appended to the query
-  string. On a `401`/`403` from upstream, the token is refreshed once and
-  the request is retried.
+- Incoming requests are matched against `services.yaml`, a single shared NiB
+  token is fetched/cached (bound to this proxy's own request IP, since it's
+  this proxy -- not the original caller -- that makes the actual upstream
+  request), and the request is forwarded upstream with `?token=<token>`
+  appended to the query string. On a `401`/`403` from upstream, the token is
+  refreshed once and the request is retried.
 - CORS is enabled and configurable via `CORS_ALLOW_ORIGINS`/`CORS_ALLOW_METHODS`/
   `CORS_ALLOW_HEADERS`/`CORS_ALLOW_CREDENTIALS` (defaults allow any origin).
 - Set `BASE_PATH` (e.g. `/nib`) to mount the proxy under a path prefix, so it

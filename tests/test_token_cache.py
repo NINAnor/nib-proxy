@@ -6,7 +6,6 @@ import httpx
 import pytest
 import respx
 
-from nib_proxy.client_key import ClientKey
 from nib_proxy.config import ServiceConfig, Settings
 from nib_proxy.token_cache import TokenCache
 
@@ -29,7 +28,7 @@ def _settings() -> Settings:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_fetch_token_sends_basic_auth_and_form_body_for_referer():
+async def test_fetch_token_sends_basic_auth_and_requestip_form_body():
     settings = _settings()
     route = respx.post(settings.token_url).mock(
         return_value=httpx.Response(200, json={"token": "abc123"})
@@ -37,44 +36,17 @@ async def test_fetch_token_sends_basic_auth_and_form_body_for_referer():
 
     async with httpx.AsyncClient() as client:
         cache = TokenCache(settings)
-        token = await cache.get_token(
-            client, ClientKey(mode="referer", value="example.com")
-        )
+        token = await cache.get_token(client)
 
     assert token == "abc123"
     request = route.calls.last.request
     expected_auth = "Basic " + base64.b64encode(b"user:pass").decode()
     assert request.headers["authorization"] == expected_auth
     body = request.content.decode()
-    assert "client=referer" in body
-    assert "referer=example.com" in body
-    assert "expiration=3600" in body
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_fetch_token_uses_requestip_for_ip_mode():
-    """IP-bound tokens use client=requestip: NiB auto-detects the caller's
-    IP, which will match this proxy's own egress IP on subsequent upstream
-    requests -- unlike an explicit client=ip with the original browser's IP,
-    which this proxy never actually connects from.
-    """
-    settings = _settings()
-    route = respx.post(settings.token_url).mock(
-        return_value=httpx.Response(200, json={"token": "abc123"})
-    )
-
-    async with httpx.AsyncClient() as client:
-        cache = TokenCache(settings)
-        token = await cache.get_token(client, ClientKey(mode="ip", value="1.2.3.4"))
-
-    assert token == "abc123"
-    request = route.calls.last.request
-    body = request.content.decode()
     assert "client=requestip" in body
+    assert "expiration=3600" in body
     assert "ip=" not in body
     assert "referer=" not in body
-    assert "expiration=3600" in body
 
 
 @pytest.mark.asyncio
@@ -87,9 +59,8 @@ async def test_token_is_cached_across_calls():
 
     async with httpx.AsyncClient() as client:
         cache = TokenCache(settings)
-        key = ClientKey(mode="referer", value="example.com")
-        token1 = await cache.get_token(client, key)
-        token2 = await cache.get_token(client, key)
+        token1 = await cache.get_token(client)
+        token2 = await cache.get_token(client)
 
     assert token1 == token2 == "cached-token"
     assert route.call_count == 1
@@ -108,9 +79,8 @@ async def test_force_refresh_fetches_new_token():
 
     async with httpx.AsyncClient() as client:
         cache = TokenCache(settings)
-        key = ClientKey(mode="referer", value="example.com")
-        token1 = await cache.get_token(client, key)
-        token2 = await cache.get_token(client, key, force_refresh=True)
+        token1 = await cache.get_token(client)
+        token2 = await cache.get_token(client, force_refresh=True)
 
     assert token1 == "first"
     assert token2 == "second"
@@ -129,30 +99,9 @@ async def test_invalidate_forces_new_token_fetch():
 
     async with httpx.AsyncClient() as client:
         cache = TokenCache(settings)
-        key = ClientKey(mode="referer", value="example.com")
-        token1 = await cache.get_token(client, key)
-        cache.invalidate(key)
-        token2 = await cache.get_token(client, key)
+        token1 = await cache.get_token(client)
+        cache.invalidate()
+        token2 = await cache.get_token(client)
 
     assert token1 == "first"
     assert token2 == "second"
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_different_client_keys_get_different_tokens():
-    settings = _settings()
-    respx.post(settings.token_url).mock(
-        side_effect=[
-            httpx.Response(200, json={"token": "token-a"}),
-            httpx.Response(200, json={"token": "token-b"}),
-        ]
-    )
-
-    async with httpx.AsyncClient() as client:
-        cache = TokenCache(settings)
-        token_a = await cache.get_token(client, ClientKey(mode="ip", value="1.1.1.1"))
-        token_b = await cache.get_token(client, ClientKey(mode="ip", value="2.2.2.2"))
-
-    assert token_a == "token-a"
-    assert token_b == "token-b"

@@ -1,9 +1,9 @@
 """FastAPI application implementing the NiB (Norge i Bilder) proxy.
 
 Incoming requests are matched against the configured service registry
-(``services.yaml``), authenticated with a per-origin/IP NiB token (fetched
-and cached automatically), and forwarded to the corresponding upstream
-service.
+(``services.yaml``), authenticated with a single shared NiB token (fetched
+and cached automatically, bound to this proxy's own request IP), and
+forwarded to the corresponding upstream service.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ import httpx
 from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from nib_proxy.client_key import resolve_client_key
 from nib_proxy.config import ServiceConfig, Settings, load_settings
 from nib_proxy.token_cache import TokenCache
 from nib_proxy.token_client import TokenRequestError
@@ -267,25 +266,17 @@ async def handle_proxy_request(
         sub_path,
     )
 
-    client_key = resolve_client_key(request)
-    logger.debug(
-        "Resolved client key mode=%s value=%s for %s",
-        client_key.mode,
-        client_key.value,
-        service.name,
-    )
     body = await request.body()
 
     async def _forward(*, force_refresh: bool) -> httpx.Response:
         try:
             token = await token_cache.get_token(
-                http_client, client_key, force_refresh=force_refresh
+                http_client, force_refresh=force_refresh
             )
         except TokenRequestError as exc:
             logger.error(
-                "Token acquisition failed for %s (client=%s): %s",
+                "Token acquisition failed for %s: %s",
                 service.name,
-                client_key.cache_key,
                 exc,
             )
             # Propagate the upstream token endpoint's error as-is (status,
@@ -322,14 +313,13 @@ async def handle_proxy_request(
 
         if upstream_response.status_code in (401, 403):
             logger.warning(
-                "Upstream %s returned %d for %s (client=%s); "
-                "invalidating token and retrying once",
+                "Upstream %s returned %d for %s; invalidating token and "
+                "retrying once",
                 service.name,
                 upstream_response.status_code,
                 full_path,
-                client_key.cache_key,
             )
-            token_cache.invalidate(client_key)
+            token_cache.invalidate()
             upstream_response = await _forward(force_refresh=True)
     except _UpstreamTokenError as exc:
         elapsed_ms = (time.monotonic() - start) * 1000
