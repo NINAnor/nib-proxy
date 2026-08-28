@@ -17,7 +17,6 @@ def _settings() -> Settings:
         nib_password="pass",
         token_url="https://backend-api.klienter-prod-k8s2.norgeibilder.no/token/tilecache",
         token_validity_seconds=3600,
-        cache_max_entries=100,
         services=(
             ServiceConfig(
                 name="wmts-utm32",

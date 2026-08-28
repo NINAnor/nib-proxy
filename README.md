@@ -7,16 +7,14 @@ Eksport API's token endpoint
 `POST /token/tilecache`) using a shared GeoID credential, reuses the
 resulting token per client (HTTP `Referer`/`Origin`, falling back to the
 requester's IP), and automatically refreshes the token on expiry (default
-validity: 1 hour). It can also cache proxied responses in-memory (useful for
-WMTS tiles) to reduce load on the upstream services.
+validity: 1 hour).
 
 ## How it works
 
 - Set `NIB_USERNAME` / `NIB_PASSWORD` (a GeoID user) in `.env`.
 - Configure the proxied services in `services.yaml` — no code changes needed
   to add/remove upstream services. Each entry maps a `path_prefix` on the
-  proxy to an `upstream` base URL, and can optionally enable response caching
-  with a TTL.
+  proxy to an `upstream` base URL.
 - Incoming requests are matched against `services.yaml`, a NiB token is
   fetched/cached per client key (`Referer`/`Origin` host, else IP), and the
   request is forwarded upstream with `?token=<token>` appended to the query
@@ -29,20 +27,14 @@ WMTS tiles) to reduce load on the upstream services.
   that strips the prefix. `/healthz` remains available both prefixed and
   unprefixed for infra liveness/readiness probes.
 - `GET /services` (or `GET <BASE_PATH>/services`) lists the currently
-  configured upstream services (name, effective path prefix, upstream URL,
-  passthrough prefix, and cache settings) for introspection/debugging.
-- Set `PUBLIC_BASE_URL` (e.g. `https://example.org`) to rewrite upstream
-  base URLs found in textual response bodies (WMS/WMTS Capabilities
-  documents) to point back at this proxy instead, so clients keep going
-  through it (and its authentication) for subsequent requests instead of
-  bypassing it. Two kinds of URLs are rewritten:
-  - Exact matches of a service's configured alias (any scheme/port variant)
-    are rewritten to that service's friendly external URL.
-  - Any other same-origin URL (e.g. ArcGIS's own canonical REST paths,
-    which some upstreams embed regardless of which alias was used to fetch
-    the document) is rewritten to a passthrough URL
-    (`<PUBLIC_BASE_URL><BASE_PATH>/_upstream/<service-name>/<original-path>`)
-    that, when followed, forwards to the exact same upstream path/host.
+  configured upstream services (name, effective path prefix, upstream URL)
+  for introspection/debugging.
+- Set `PUBLIC_BASE_URL` (e.g. `https://example.org`) to rewrite occurrences
+  of a service's upstream URL found in textual response bodies (WMS/WMTS
+  Capabilities documents) to point back at this proxy instead (any
+  scheme/port variant of the configured upstream URL is matched), so
+  clients keep going through it (and its authentication) for subsequent
+  requests instead of bypassing it.
 
 ## Setup
 Install `uv`: https://docs.astral.sh/uv/getting-started/installation/

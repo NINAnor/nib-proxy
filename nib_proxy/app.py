@@ -3,8 +3,7 @@
 Incoming requests are matched against the configured service registry
 (``services.yaml``), authenticated with a per-origin/IP NiB token (fetched
 and cached automatically), and forwarded to the corresponding upstream
-service. Responses can optionally be cached (see ``response_cache.py``),
-which is especially useful for WMTS tile endpoints.
+service.
 """
 
 from __future__ import annotations
@@ -22,8 +21,7 @@ from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from nib_proxy.client_key import resolve_client_key
-from nib_proxy.config import PASSTHROUGH_SEGMENT, ServiceConfig, Settings, load_settings
-from nib_proxy.response_cache import ResponseCache
+from nib_proxy.config import ServiceConfig, Settings, load_settings
 from nib_proxy.token_cache import TokenCache
 from nib_proxy.token_client import TokenRequestError
 
@@ -96,7 +94,7 @@ def _describe_body(headers: httpx.Headers | dict, body: bytes) -> str:
 
 
 @cache
-def _upstream_alias_pattern(upstream: str) -> re.Pattern[str]:
+def _upstream_url_pattern(upstream: str) -> re.Pattern[str]:
     """Build a pattern matching any scheme/port variant of an upstream URL.
 
     Response bodies (WMS/WMTS Capabilities documents) may embed the
@@ -110,45 +108,20 @@ def _upstream_alias_pattern(upstream: str) -> re.Pattern[str]:
     return re.compile(rf"https?://{host}(?::\d+)?{path}")
 
 
-@cache
-def _upstream_origin_pattern(origin: str) -> re.Pattern[str]:
-    """Build a pattern matching any scheme/port variant of an upstream origin.
-
-    Some upstream services (e.g. ArcGIS) embed their own *canonical* REST
-    URLs in Capabilities documents, which don't share the friendly alias
-    path configured in ``services.yaml`` at all -- only the host is
-    guaranteed to match. A negative lookahead prevents partially matching a
-    longer, unrelated hostname that happens to share this one as a prefix.
-    """
-    parsed = urlsplit(origin)
-    host = re.escape(parsed.hostname or "")
-    return re.compile(rf"https?://{host}(?::\d+)?(?![\w.:-])")
-
-
 def _rewrite_upstream_urls(
     body: bytes,
     headers: httpx.Headers | dict,
     settings: Settings,
     service: ServiceConfig,
 ) -> bytes:
-    """Rewrite occurrences of the upstream's URLs in textual bodies.
+    """Rewrite occurrences of the upstream's URL in textual bodies.
 
-    WMS/WMTS Capabilities documents embed the upstream's own base URL(s)
-    for subsequent requests (e.g. GetTile/GetMap), sometimes with a
-    different scheme, an explicit port, or even a completely different
-    (but same-host) canonical path than the friendly alias configured for
-    this service. If left untouched, clients would be pointed directly at
-    the upstream, bypassing this proxy (and its authentication) entirely.
-    Only applied when ``PUBLIC_BASE_URL`` is configured, and only to
-    textual bodies.
-
-    Two passes are applied:
-    1. Exact alias matches (scheme/port-agnostic) are rewritten to this
-       service's friendly external URL.
-    2. Any remaining same-origin URLs (e.g. ArcGIS's own canonical REST
-       paths, which don't share the alias path at all) are rewritten to a
-       passthrough URL that preserves the original path, so following the
-       link still routes back through this proxy to the same upstream.
+    WMS/WMTS Capabilities documents embed the upstream's own base URL for
+    subsequent requests (e.g. GetTile/GetMap), sometimes with a different
+    scheme or an explicit port. If left untouched, clients would be
+    pointed directly at the upstream, bypassing this proxy (and its
+    authentication) entirely. Only applied when ``PUBLIC_BASE_URL`` is
+    configured, and only to textual bodies.
     """
     if not settings.public_base_url or not body:
         return body
@@ -162,28 +135,18 @@ def _rewrite_upstream_urls(
     except UnicodeDecodeError:
         return body
 
-    original_text = text
-    alias_url = settings.external_url_for(service)
-    text, alias_count = _upstream_alias_pattern(service.upstream).subn(alias_url, text)
-
-    passthrough_url = settings.external_passthrough_url_for(service)
-    text, passthrough_count = _upstream_origin_pattern(service.origin).subn(
-        passthrough_url, text
-    )
-
-    if text == original_text:
+    external_url = settings.external_url_for(service)
+    rewritten, count = _upstream_url_pattern(service.upstream).subn(external_url, text)
+    if count == 0:
         return body
 
     logger.debug(
-        "Rewrote %d alias + %d passthrough occurrence(s) of upstream URLs "
-        "for %s (alias=%s, passthrough=%s)",
-        alias_count,
-        passthrough_count,
+        "Rewrote %d occurrence(s) of upstream URL for %s -> %s",
+        count,
         service.name,
-        alias_url,
-        passthrough_url,
+        external_url,
     )
-    return text.encode("utf-8")
+    return rewritten.encode("utf-8")
 
 
 class _UpstreamTokenError(Exception):
@@ -195,7 +158,7 @@ class _UpstreamTokenError(Exception):
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    """Create the FastAPI application, wiring up caches and the http client.
+    """Create the FastAPI application, wiring up the token cache and http client.
 
     If ``settings.base_path`` is set (e.g. ``/nib``), all routes (including
     ``/healthz``) are mounted under that prefix, so the service can be
@@ -204,7 +167,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """
     settings = settings or load_settings()
     token_cache = TokenCache(settings)
-    response_cache = ResponseCache(max_entries=settings.cache_max_entries)
 
     logger.info(
         "Loaded %d configured service(s): %s",
@@ -232,7 +194,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="NiB Proxy", lifespan=lifespan)
     app.state.settings = settings
     app.state.token_cache = token_cache
-    app.state.response_cache = response_cache
 
     app.add_middleware(
         CORSMiddleware,
@@ -256,14 +217,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "name": service.name,
                 "path_prefix": f"{settings.base_path}{service.path_prefix}",
                 "upstream": service.upstream,
-                "passthrough_prefix": (
-                    f"{settings.base_path}/{PASSTHROUGH_SEGMENT}/{service.name}"
-                ),
-                "cache": {
-                    "enabled": service.cache.enabled,
-                    "ttl_seconds": service.cache.ttl_seconds,
-                    "methods": list(service.cache.methods),
-                },
             }
             for service in settings.services
         ]
@@ -291,10 +244,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 async def handle_proxy_request(
     app: FastAPI, request: Request, full_path: str
 ) -> Response:
-    """Resolve, authenticate, cache, and forward a single proxied request."""
+    """Resolve, authenticate, and forward a single proxied request."""
     settings: Settings = app.state.settings
     token_cache: TokenCache = app.state.token_cache
-    response_cache: ResponseCache = app.state.response_cache
     http_client: httpx.AsyncClient = app.state.http_client
 
     start = time.monotonic()
@@ -304,44 +256,16 @@ async def handle_proxy_request(
     if match is None:
         logger.warning("No service matches path %r (method=%s)", full_path, method)
         return Response(content="No matching service configured", status_code=404)
-    service, sub_path, passthrough = (
-        match.service,
-        match.sub_path,
-        match.passthrough,
-    )
+    service, sub_path = match.service, match.sub_path
 
     query_string = str(request.url.query)
     logger.info(
-        "Request %s /%s -> service=%s sub_path=%r%s",
+        "Request %s /%s -> service=%s sub_path=%r",
         method,
         full_path,
         service.name,
         sub_path,
-        " (passthrough)" if passthrough else "",
     )
-
-    cache_enabled = service.cache.enabled and method in service.cache.methods
-    cache_key = None
-    if cache_enabled:
-        cache_key = ResponseCache.build_key(
-            f"{service.name}{':passthrough' if passthrough else ''}",
-            method,
-            sub_path,
-            query_string,
-        )
-        cached = response_cache.get(cache_key)
-        if cached is not None:
-            logger.info(
-                "Cache HIT for %s (key=%r), skipping token+upstream call",
-                service.name,
-                cache_key,
-            )
-            return Response(
-                content=cached.body,
-                status_code=cached.status_code,
-                headers=cached.headers,
-            )
-        logger.debug("Cache MISS for %s (key=%r)", service.name, cache_key)
 
     client_key = resolve_client_key(request)
     logger.debug(
@@ -369,12 +293,7 @@ async def handle_proxy_request(
             # credentials, rate limits, etc.) are easy to debug directly
             # from the source.
             raise _UpstreamTokenError(exc.response) from exc
-        # In passthrough mode, sub_path is already an absolute upstream path
-        # (rewritten from e.g. an ArcGIS canonical REST URL), so it's
-        # appended to the upstream's origin directly rather than to its
-        # configured alias path.
-        upstream_base = service.origin if passthrough else service.upstream
-        upstream_url = f"{upstream_base}{sub_path}"
+        upstream_url = f"{service.upstream}{sub_path}"
         headers = dict(request.headers)
         # The inbound Host header refers to this proxy, not the upstream
         # service; forwarding it verbatim breaks virtual-host routing on
@@ -387,7 +306,7 @@ async def handle_proxy_request(
             method,
             upstream_url,
             forward_params,
-            upstream_base,
+            service.upstream,
             token,
         )
         return await http_client.request(
@@ -435,21 +354,6 @@ async def handle_proxy_request(
     response_body = _rewrite_upstream_urls(
         upstream_response.content, response_headers, settings, service
     )
-
-    if cache_enabled and cache_key and upstream_response.status_code < 400:
-        response_cache.set(
-            cache_key,
-            status_code=upstream_response.status_code,
-            headers=response_headers,
-            body=response_body,
-            ttl_seconds=service.cache.ttl_seconds,
-        )
-        logger.debug(
-            "Cached response for %s (key=%r, ttl=%ds)",
-            service.name,
-            cache_key,
-            service.cache.ttl_seconds,
-        )
 
     elapsed_ms = (time.monotonic() - start) * 1000
     logger.info(

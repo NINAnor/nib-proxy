@@ -2,54 +2,38 @@
 # Add new services here without touching any code.
 #
 # Fields:
-#   name:        unique identifier, used internally (e.g. as a cache-key prefix)
+#   name:        unique identifier for this service
 #   path_prefix: path prefix on the proxy that routes to this service
 #   upstream:    base URL of the upstream service
-#   cache:       optional response caching (useful for WMTS tiles)
-#     enabled:      whether to cache responses for this service (default false)
-#     ttl_seconds:  how long to keep cached responses (default 300)
-#     methods:      HTTP methods eligible for caching (default [GET])
 
 - name: wms-ortofoto
   path_prefix: /wms/ortofoto
-  upstream: https://services.norgeibilder.no/wms/ortofoto
+  upstream: https://services.norgeibilder.no/arcgis/services/ortofoto/ImageServer/WMSServer
 
 - name: wms-prosjekter
   path_prefix: /wms/prosjekter
-  upstream: https://services.norgeibilder.no/wms/prosjekter
+  upstream: https://services.norgeibilder.no/arcgis/services/prosjekter/ImageServer/WMSServer
 
 - name: wms-mosaikk
   path_prefix: /wms/mosaikk
-  upstream: https://services.norgeibilder.no/wms/mosaikk
+  upstream: https://services.norgeibilder.no/arcgis/services/mosaikk/ImageServer/WMSServer
 
 - name: wmts-utm32
   path_prefix: /wmts/utm32
-  upstream: https://tilecache.norgeibilder.no/wmts/utm32_euref89
-  cache:
-    enabled: true
-    ttl_seconds: 86400
-    methods: [GET]
+  upstream: https://tilecache.norgeibilder.no/arcgis/rest/services/Nibcache_UTM32_EUREF89_v2/MapServer/WMTS
+
 
 - name: wmts-utm33
   path_prefix: /wmts/utm33
-  upstream: https://tilecache.norgeibilder.no/wmts/utm33_euref89
-  cache:
-    enabled: true
-    ttl_seconds: 86400
-    methods: [GET]
+  upstream: https://tilecache.norgeibilder.no/arcgis/rest/services/Nibcache_UTM33_EUREF89_v2/MapServer/WMTS
+
 
 - name: wmts-utm35
   path_prefix: /wmts/utm35
-  upstream: https://tilecache.norgeibilder.no/wmts/utm35_euref89
-  cache:
-    enabled: true
-    ttl_seconds: 86400
-    methods: [GET]
+  upstream: https://tilecache.norgeibilder.no/arcgis/rest/services/Nibcache_UTM35_EUREF89_v2/MapServer/WMTS
+
 
 - name: wmts-webmercator
   path_prefix: /wmts/webmercator
-  upstream: https://tilecache.norgeibilder.no/wmts/webmercator
-  cache:
-    enabled: true
-    ttl_seconds: 86400
-    methods: [GET]
+  upstream: https://tilecache.norgeibilder.no/arcgis/rest/services/Nibcache_web_mercator_v2/MapServer/WMTS
+

@@ -1,4 +1,4 @@
-"""Integration-style tests for the proxy app (routing, auth, caching)."""
+"""Integration-style tests for the proxy app (routing, auth, URL rewriting)."""
 
 import gzip
 
@@ -8,12 +8,11 @@ import respx
 from asgi_lifespan import LifespanManager
 
 from nib_proxy.app import create_app
-from nib_proxy.config import CacheConfig, CorsConfig, ServiceConfig, Settings
+from nib_proxy.config import CorsConfig, ServiceConfig, Settings
 
 
 def _settings(
     *,
-    cache_enabled: bool = False,
     cors: CorsConfig | None = None,
     base_path: str = "",
     public_base_url: str = "",
@@ -23,7 +22,6 @@ def _settings(
         nib_password="pass",
         token_url="https://backend-api.klienter-prod-k8s2.norgeibilder.no/token/tilecache",
         token_validity_seconds=3600,
-        cache_max_entries=100,
         cors=cors or CorsConfig(),
         base_path=base_path,
         public_base_url=public_base_url,
@@ -32,9 +30,6 @@ def _settings(
                 name="wmts-utm32",
                 path_prefix="/wmts/utm32",
                 upstream="https://tilecache.norgeibilder.no/wmts/utm32_euref89",
-                cache=CacheConfig(
-                    enabled=cache_enabled, ttl_seconds=60, methods=("GET",)
-                ),
             ),
         ),
     )
@@ -110,37 +105,6 @@ async def test_retries_with_fresh_token_on_401():
     assert upstream_route.call_count == 2
     last_url = upstream_route.calls.last.request.url
     assert last_url.params["token"] == "fresh"
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_cached_response_skips_token_and_upstream_on_hit():
-    settings = _settings(cache_enabled=True)
-    token_route = respx.post(settings.token_url).mock(
-        return_value=httpx.Response(200, json={"token": "tok"})
-    )
-    upstream_route = respx.get(
-        "https://tilecache.norgeibilder.no/wmts/utm32_euref89/1/2/3.png"
-    ).mock(return_value=httpx.Response(200, content=b"tile-bytes"))
-
-    app = create_app(settings)
-    async with LifespanManager(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
-            first = await client.get("/wmts/utm32/1/2/3.png")
-            second = await client.get(
-                "/wmts/utm32/1/2/3.png",
-                headers={"referer": "https://another-origin.example"},
-            )
-
-    assert first.status_code == second.status_code == 200
-    assert first.content == second.content == b"tile-bytes"
-    # Only one upstream call and one token call, even though the second
-    # request came from a different origin: cache key ignores client identity.
-    assert upstream_route.call_count == 1
-    assert token_route.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -314,14 +278,11 @@ async def test_healthz_available_both_prefixed_and_unprefixed_with_base_path():
 
 
 def test_base_path_normalization():
-    from nib_proxy.config import Settings
-
     settings = Settings(
         nib_username="",
         nib_password="",
         token_url="https://example.com/token",
         token_validity_seconds=3600,
-        cache_max_entries=10,
         services=(),
         base_path="nib/",
     )
@@ -332,7 +293,6 @@ def test_base_path_normalization():
         nib_password="",
         token_url="https://example.com/token",
         token_validity_seconds=3600,
-        cache_max_entries=10,
         services=(),
         base_path="/",
     )
@@ -341,7 +301,7 @@ def test_base_path_normalization():
 
 @pytest.mark.asyncio
 async def test_list_services_returns_registry():
-    settings = _settings(cache_enabled=True)
+    settings = _settings()
     app = create_app(settings)
     async with LifespanManager(app):
         transport = httpx.ASGITransport(app=app)
@@ -356,12 +316,6 @@ async def test_list_services_returns_registry():
             "name": "wmts-utm32",
             "path_prefix": "/wmts/utm32",
             "upstream": "https://tilecache.norgeibilder.no/wmts/utm32_euref89",
-            "passthrough_prefix": "/_upstream/wmts-utm32",
-            "cache": {
-                "enabled": True,
-                "ttl_seconds": 60,
-                "methods": ["GET"],
-            },
         }
     ]
 
@@ -411,41 +365,8 @@ async def test_query_string_is_forwarded_to_upstream():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_cache_key_distinguishes_different_query_strings():
-    settings = _settings(cache_enabled=True)
-    respx.post(settings.token_url).mock(
-        return_value=httpx.Response(200, json={"token": "tok"})
-    )
-    upstream = respx.get(
-        url__regex=r"https://tilecache\.norgeibilder\.no/wmts/utm32_euref89/tile\.png"
-    ).mock(
-        side_effect=[
-            httpx.Response(200, content=b"style-a"),
-            httpx.Response(200, content=b"style-b"),
-        ]
-    )
-
-    app = create_app(settings)
-    async with LifespanManager(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
-            response_a = await client.get("/wmts/utm32/tile.png?style=a")
-            response_b = await client.get("/wmts/utm32/tile.png?style=b")
-            # Repeat first request: should hit cache, not upstream again.
-            response_a_again = await client.get("/wmts/utm32/tile.png?style=a")
-
-    assert response_a.content == b"style-a"
-    assert response_b.content == b"style-b"
-    assert response_a_again.content == b"style-a"
-    assert upstream.call_count == 2
-
-
-@pytest.mark.asyncio
-@respx.mock
 async def test_logs_request_lifecycle_including_token(caplog):
-    settings = _settings(cache_enabled=True)
+    settings = _settings()
     respx.post(settings.token_url).mock(
         return_value=httpx.Response(200, json={"token": "super-secret-token-value"})
     )
@@ -467,7 +388,6 @@ async def test_logs_request_lifecycle_including_token(caplog):
 
     # Key lifecycle events are logged.
     assert "wmts-utm32" in messages
-    assert "Cache MISS" in messages
     assert "Requesting NiB token" in messages
     assert "Request GET /wmts/utm32/1/2/3.png -> 200" in messages
 
@@ -788,47 +708,12 @@ async def test_no_rewrite_for_binary_body():
     assert response.content == binary_body
 
 
-@pytest.mark.asyncio
-@respx.mock
-async def test_rewritten_body_is_cached_already_rewritten():
-    settings = _settings(
-        cache_enabled=True, public_base_url="https://proxy.example.org"
-    )
-    respx.post(settings.token_url).mock(
-        return_value=httpx.Response(200, json={"token": "tok"})
-    )
-    capabilities_xml = (
-        '<a href="https://tilecache.norgeibilder.no/wmts/utm32_euref89/foo"/>'
-    )
-    upstream = respx.get(
-        "https://tilecache.norgeibilder.no/wmts/utm32_euref89/capabilities.xml"
-    ).mock(
-        return_value=httpx.Response(
-            200, content=capabilities_xml, headers={"content-type": "application/xml"}
-        )
-    )
-
-    app = create_app(settings)
-    async with LifespanManager(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
-            first = await client.get("/wmts/utm32/capabilities.xml")
-            second = await client.get("/wmts/utm32/capabilities.xml")
-
-    assert upstream.call_count == 1
-    assert first.text == second.text
-    assert 'href="https://proxy.example.org/wmts/utm32/foo"' in second.text
-
-
 def test_external_url_for_combines_public_base_url_base_path_and_prefix():
     settings = Settings(
         nib_username="",
         nib_password="",
         token_url="https://example.com/token",
         token_validity_seconds=3600,
-        cache_max_entries=10,
         services=(),
         base_path="/nib",
         public_base_url="https://proxy.example.org",
@@ -841,76 +726,3 @@ def test_external_url_for_combines_public_base_url_base_path_and_prefix():
     assert (
         settings.external_url_for(service) == "https://proxy.example.org/nib/wmts/utm32"
     )
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_rewrite_handles_canonical_upstream_path_via_passthrough():
-    """Some upstreams (e.g. ArcGIS) embed their own canonical REST URL in
-    Capabilities documents, which shares only the host with the configured
-    alias -- not the path. These must be rewritten to a passthrough URL
-    that, when followed, still routes back through this proxy correctly.
-    """
-    settings = _settings(public_base_url="https://proxy.example.org")
-    respx.post(settings.token_url).mock(
-        return_value=httpx.Response(200, json={"token": "tok"})
-    )
-    canonical_path = (
-        "/arcgis/rest/services/Nibcache/MapServer/WMTS/1.0.0/WMTSCapabilities.xml"
-    )
-    capabilities_xml = f'<a href="https://tilecache.norgeibilder.no{canonical_path}"/>'
-    respx.get(
-        "https://tilecache.norgeibilder.no/wmts/utm32_euref89/capabilities.xml"
-    ).mock(
-        return_value=httpx.Response(
-            200, content=capabilities_xml, headers={"content-type": "application/xml"}
-        )
-    )
-
-    app = create_app(settings)
-    async with LifespanManager(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
-            response = await client.get("/wmts/utm32/capabilities.xml")
-            assert response.status_code == 200
-            rewritten_url = (
-                f"https://proxy.example.org/_upstream/wmts-utm32{canonical_path}"
-            )
-            assert rewritten_url in response.text
-
-            # Following the rewritten link (relative to this proxy) must
-            # forward correctly to the exact same canonical upstream path.
-            canonical_upstream_route = respx.get(
-                f"https://tilecache.norgeibilder.no{canonical_path}"
-            ).mock(return_value=httpx.Response(200, content=b"canonical-ok"))
-            follow_up = await client.get(f"/_upstream/wmts-utm32{canonical_path}")
-
-    assert follow_up.status_code == 200
-    assert follow_up.content == b"canonical-ok"
-    assert canonical_upstream_route.calls.last.request.url.params["token"] == "tok"
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_passthrough_respects_base_path():
-    settings = _settings(base_path="/nib", public_base_url="https://proxy.example.org")
-    respx.post(settings.token_url).mock(
-        return_value=httpx.Response(200, json={"token": "tok"})
-    )
-    upstream = respx.get("https://tilecache.norgeibilder.no/arcgis/rest/foo").mock(
-        return_value=httpx.Response(200, content=b"ok")
-    )
-
-    app = create_app(settings)
-    async with LifespanManager(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
-            response = await client.get("/nib/_upstream/wmts-utm32/arcgis/rest/foo")
-
-    assert response.status_code == 200
-    assert response.content == b"ok"
-    assert upstream.calls.last.request.url.params["token"] == "tok"

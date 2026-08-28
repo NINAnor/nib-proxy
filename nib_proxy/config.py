@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import pathlib
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
 
 import environ
 import yaml
@@ -18,23 +17,6 @@ import yaml
 env = environ.Env()
 BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 environ.Env.read_env(str(BASE_DIR / ".env"))
-
-# Internal proxy path segment used for "passthrough" requests: absolute
-# upstream URLs (e.g. ArcGIS's own canonical REST paths embedded in
-# Capabilities documents, which don't share the friendly alias path
-# configured for a service) are rewritten to
-# ``{public_base_url}{base_path}/_upstream/{service.name}{original_path}``
-# so that following them still routes back through this proxy.
-PASSTHROUGH_SEGMENT = "_upstream"
-
-
-@dataclass(frozen=True)
-class CacheConfig:
-    """Response cache settings for a single service."""
-
-    enabled: bool = False
-    ttl_seconds: int = 300
-    methods: tuple[str, ...] = ("GET",)
 
 
 @dataclass(frozen=True)
@@ -44,15 +26,11 @@ class ServiceConfig:
     name: str
     path_prefix: str
     upstream: str
-    cache: CacheConfig = field(default_factory=CacheConfig)
-    origin: str = field(init=False)
 
     def __post_init__(self) -> None:
         """Normalize prefix/upstream so they don't end with a trailing slash."""
         object.__setattr__(self, "path_prefix", self.path_prefix.rstrip("/"))
         object.__setattr__(self, "upstream", self.upstream.rstrip("/"))
-        parsed = urlsplit(self.upstream)
-        object.__setattr__(self, "origin", f"{parsed.scheme}://{parsed.netloc}")
 
 
 @dataclass(frozen=True)
@@ -77,7 +55,6 @@ class RouteMatch:
 
     service: ServiceConfig
     sub_path: str
-    passthrough: bool = False
 
 
 @dataclass(frozen=True)
@@ -88,7 +65,6 @@ class Settings:
     nib_password: str
     token_url: str
     token_validity_seconds: int
-    cache_max_entries: int
     services: tuple[ServiceConfig, ...]
     cors: CorsConfig = field(default_factory=CorsConfig)
     base_path: str = ""
@@ -105,11 +81,8 @@ class Settings:
     def match_service(self, path: str) -> RouteMatch | None:
         """Find the service whose prefix matches the given path.
 
-        Checks friendly alias prefixes first (longest match wins). If none
-        match, also checks the internal passthrough prefix
-        (``/_upstream/<service-name>/...``) used for absolute upstream URLs
-        rewritten into response bodies (see ``external_passthrough_url_for``).
-        Returns ``None`` if nothing matches.
+        Returns the matching service and remaining sub-path, or ``None`` if
+        no service matches. The longest matching prefix wins.
         """
         path = "/" + path.lstrip("/")
 
@@ -119,39 +92,21 @@ class Settings:
             if path == prefix or path.startswith(prefix + "/"):
                 if best is None or len(service.path_prefix) > len(best.path_prefix):
                     best = service
-        if best is not None:
-            sub_path = path[len(best.path_prefix) :]
-            return RouteMatch(service=best, sub_path=sub_path)
+        if best is None:
+            return None
 
-        for service in self.services:
-            prefix = f"/{PASSTHROUGH_SEGMENT}/{service.name}"
-            if path == prefix or path.startswith(prefix + "/"):
-                sub_path = path[len(prefix) :]
-                return RouteMatch(service=service, sub_path=sub_path, passthrough=True)
-
-        return None
+        sub_path = path[len(best.path_prefix) :]
+        return RouteMatch(service=best, sub_path=sub_path)
 
     def external_url_for(self, service: ServiceConfig) -> str:
-        """Return the externally-visible alias URL for a service.
+        """Return the externally-visible URL for a service through this proxy.
 
-        Used to rewrite occurrences of the service's own alias path found
-        in response bodies, so clients keep talking to this proxy for
-        subsequent requests instead of bypassing it.
+        Used to rewrite occurrences of the service's own upstream URL found
+        in response bodies (e.g. WMS/WMTS Capabilities documents), so
+        clients keep talking to this proxy for subsequent requests instead
+        of bypassing it.
         """
         return f"{self.public_base_url}{self.base_path}{service.path_prefix}"
-
-    def external_passthrough_url_for(self, service: ServiceConfig) -> str:
-        """Return the externally-visible passthrough URL for a service.
-
-        Used to rewrite occurrences of the service's upstream *origin*
-        (regardless of path) found in response bodies -- e.g. ArcGIS's own
-        canonical REST URLs embedded in Capabilities documents, which don't
-        share the service's configured alias path at all.
-        """
-        return (
-            f"{self.public_base_url}{self.base_path}"
-            f"/{PASSTHROUGH_SEGMENT}/{service.name}"
-        )
 
 
 def _load_services(config_path: pathlib.Path) -> tuple[ServiceConfig, ...]:
@@ -164,23 +119,14 @@ def _load_services(config_path: pathlib.Path) -> tuple[ServiceConfig, ...]:
     else:
         raw = json.loads(text or "[]")
 
-    services = []
-    for entry in raw:
-        cache_raw = entry.get("cache") or {}
-        cache = CacheConfig(
-            enabled=bool(cache_raw.get("enabled", False)),
-            ttl_seconds=int(cache_raw.get("ttl_seconds", 300)),
-            methods=tuple(m.upper() for m in cache_raw.get("methods", ["GET"])),
+    return tuple(
+        ServiceConfig(
+            name=entry["name"],
+            path_prefix=entry["path_prefix"],
+            upstream=entry["upstream"],
         )
-        services.append(
-            ServiceConfig(
-                name=entry["name"],
-                path_prefix=entry["path_prefix"],
-                upstream=entry["upstream"],
-                cache=cache,
-            )
-        )
-    return tuple(services)
+        for entry in raw
+    )
 
 
 def load_settings() -> Settings:
@@ -196,7 +142,6 @@ def load_settings() -> Settings:
             default="https://backend-api.klienter-prod-k8s2.norgeibilder.no/token/tilecache",
         ),
         token_validity_seconds=env.int("TOKEN_VALIDITY_SECONDS", default=3600),
-        cache_max_entries=env.int("CACHE_MAX_ENTRIES", default=5000),
         services=_load_services(config_path),
         cors=CorsConfig(
             allow_origins=tuple(env.list("CORS_ALLOW_ORIGINS", default=["*"])),
