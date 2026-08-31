@@ -23,6 +23,13 @@ expiry (default validity: 1 hour).
   refreshed once and the request is retried.
 - CORS is enabled and configurable via `CORS_ALLOW_ORIGINS`/`CORS_ALLOW_METHODS`/
   `CORS_ALLOW_HEADERS`/`CORS_ALLOW_CREDENTIALS` (defaults allow any origin).
+- Restrict proxy access with comma-separated `ALLOWED_REFERRERS` and/or
+  `ALLOWED_IPS`. When both are configured, a request is allowed if either its
+  `Referer` URL or direct client IP matches. Referrer entries match the exact
+  scheme and host plus an optional path prefix; IP entries accept addresses or
+  CIDR ranges. Leave both unset to allow all requests. The IP check uses the
+  direct TCP peer, not `X-Forwarded-For`; configure the reverse proxy to pass
+  the actual client address when deploying behind one.
 - Set `BASE_PATH` (e.g. `/nib`) to mount the proxy under a path prefix, so it
   can be exposed as `https://host/nib/...` without needing a reverse proxy
   that strips the prefix. `/healthz` remains available both prefixed and

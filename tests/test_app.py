@@ -16,6 +16,8 @@ def _settings(
     cors: CorsConfig | None = None,
     base_path: str = "",
     public_base_url: str = "",
+    allowed_referrers: tuple[str, ...] = (),
+    allowed_ips: tuple[str, ...] = (),
 ) -> Settings:
     return Settings(
         nib_username="user",
@@ -25,6 +27,8 @@ def _settings(
         cors=cors or CorsConfig(),
         base_path=base_path,
         public_base_url=public_base_url,
+        allowed_referrers=allowed_referrers,
+        allowed_ips=allowed_ips,
         services=(
             ServiceConfig(
                 name="wmts-utm32",
@@ -71,6 +75,72 @@ async def test_returns_404_for_unmatched_path():
             response = await client.get("/unknown/path")
 
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    ("client_address", "referrer"),
+    [
+        (("203.0.113.8", 1234), "https://not-allowed.example.org/map"),
+        (("198.51.100.8", 1234), "https://maps.example.org/viewer/map/42"),
+    ],
+)
+async def test_allows_request_with_matching_referrer_or_ip(client_address, referrer):
+    settings = _settings(
+        allowed_referrers=("https://maps.example.org/viewer",),
+        allowed_ips=("203.0.113.0/24",),
+    )
+    respx.post(settings.token_url).mock(
+        return_value=httpx.Response(200, json={"token": "tok"})
+    )
+    respx.get("https://tilecache.norgeibilder.no/wmts/utm32_euref89/1/2/3.png").mock(
+        return_value=httpx.Response(200, content=b"tile-bytes")
+    )
+
+    app = create_app(settings)
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app, client=client_address)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get(
+                "/wmts/utm32/1/2/3.png",
+                headers={"referer": referrer},
+            )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_rejects_disallowed_referrer_before_token_request():
+    app = create_app(_settings(allowed_referrers=("https://maps.example.org",)))
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get(
+                "/wmts/utm32/1/2/3.png",
+                headers={"referer": "https://not-allowed.example.org/map"},
+            )
+
+    assert response.status_code == 403
+    assert response.text == "Referrer or IP address is not allowed"
+
+
+@pytest.mark.asyncio
+async def test_rejects_disallowed_ip_before_token_request():
+    app = create_app(_settings(allowed_ips=("203.0.113.0/24",)))
+    async with LifespanManager(app):
+        transport = httpx.ASGITransport(app=app, client=("198.51.100.8", 1234))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get("/wmts/utm32/1/2/3.png")
+
+    assert response.status_code == 403
+    assert response.text == "Referrer or IP address is not allowed"
 
 
 @pytest.mark.asyncio

@@ -251,6 +251,24 @@ async def handle_proxy_request(
     start = time.monotonic()
     method = request.method
 
+    referrer_allowed = settings.allows_referrer(request.headers.get("referer"))
+    client_ip = request.client.host if request.client else None
+    ip_allowed = settings.allows_ip(client_ip)
+    allowed = (
+        (not settings.allowed_referrers and not settings.allowed_ips)
+        or (settings.allowed_referrers and referrer_allowed)
+        or (settings.allowed_ips and ip_allowed)
+    )
+    if not allowed:
+        logger.warning(
+            "Rejected request with disallowed referrer and IP %r (path=/%s)",
+            client_ip,
+            full_path,
+        )
+        return Response(
+            content="Referrer or IP address is not allowed", status_code=403
+        )
+
     match = settings.match_service(full_path)
     if match is None:
         logger.warning("No service matches path %r (method=%s)", full_path, method)

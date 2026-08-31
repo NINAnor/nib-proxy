@@ -7,9 +7,11 @@ can be added without touching the code.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import pathlib
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 import environ
 import yaml
@@ -69,6 +71,8 @@ class Settings:
     cors: CorsConfig = field(default_factory=CorsConfig)
     base_path: str = ""
     public_base_url: str = ""
+    allowed_referrers: tuple[str, ...] = ()
+    allowed_ips: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Normalize base_path: no trailing slash, leading slash if set."""
@@ -77,6 +81,17 @@ class Settings:
             base_path = "/" + base_path
         object.__setattr__(self, "base_path", base_path)
         object.__setattr__(self, "public_base_url", self.public_base_url.rstrip("/"))
+        object.__setattr__(
+            self,
+            "allowed_referrers",
+            tuple(referrer.rstrip("/") for referrer in self.allowed_referrers),
+        )
+        object.__setattr__(self, "allowed_ips", tuple(self.allowed_ips))
+        for allowed_ip in self.allowed_ips:
+            try:
+                ipaddress.ip_network(allowed_ip, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"Invalid ALLOWED_IPS entry: {allowed_ip!r}") from exc
 
     def match_service(self, path: str) -> RouteMatch | None:
         """Find the service whose prefix matches the given path.
@@ -107,6 +122,41 @@ class Settings:
         of bypassing it.
         """
         return f"{self.public_base_url}{self.base_path}{service.path_prefix}"
+
+    def allows_referrer(self, referrer: str | None) -> bool:
+        """Return whether a Referer header matches the configured URL allowlist."""
+        if not self.allowed_referrers:
+            return True
+        if not referrer:
+            return False
+
+        actual = urlsplit(referrer)
+        for allowed_referrer in self.allowed_referrers:
+            allowed = urlsplit(allowed_referrer)
+            if (actual.scheme, actual.netloc) != (allowed.scheme, allowed.netloc):
+                continue
+            allowed_path = allowed.path.rstrip("/")
+            matches_path = actual.path == allowed_path or actual.path.startswith(
+                allowed_path + "/"
+            )
+            if not allowed_path or matches_path:
+                return True
+        return False
+
+    def allows_ip(self, ip_address: str | None) -> bool:
+        """Return whether an address falls within the configured IP allowlist."""
+        if not self.allowed_ips:
+            return True
+        if not ip_address:
+            return False
+        try:
+            address = ipaddress.ip_address(ip_address)
+        except ValueError:
+            return False
+        return any(
+            address in ipaddress.ip_network(allowed_ip)
+            for allowed_ip in self.allowed_ips
+        )
 
 
 def _load_services(config_path: pathlib.Path) -> tuple[ServiceConfig, ...]:
@@ -151,4 +201,6 @@ def load_settings() -> Settings:
         ),
         base_path=env.str("BASE_PATH", default=""),
         public_base_url=env.str("PUBLIC_BASE_URL", default=""),
+        allowed_referrers=tuple(env.list("ALLOWED_REFERRERS", default=[])),
+        allowed_ips=tuple(env.list("ALLOWED_IPS", default=[])),
     )

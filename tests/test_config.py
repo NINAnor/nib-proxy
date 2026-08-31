@@ -73,3 +73,33 @@ def test_external_url_for_combines_public_base_url_base_path_and_prefix():
     assert (
         settings.external_url_for(service) == "https://proxy.example.org/nib/wmts/utm32"
     )
+
+
+def test_allows_referrer_matches_host_and_path_prefix():
+    settings = Settings(
+        nib_username="",
+        nib_password="",
+        token_url="https://example.com/token",
+        token_validity_seconds=3600,
+        services=(),
+        allowed_referrers=("https://maps.example.org/viewer",),
+    )
+
+    assert settings.allows_referrer("https://maps.example.org/viewer/map/42")
+    assert not settings.allows_referrer("https://maps.example.org/other")
+    assert not settings.allows_referrer("https://other.example.org/viewer")
+
+
+def test_allows_ip_matches_addresses_and_cidr_ranges():
+    settings = Settings(
+        nib_username="",
+        nib_password="",
+        token_url="https://example.com/token",
+        token_validity_seconds=3600,
+        services=(),
+        allowed_ips=("203.0.113.10", "2001:db8::/32"),
+    )
+
+    assert settings.allows_ip("203.0.113.10")
+    assert settings.allows_ip("2001:db8:1::1")
+    assert not settings.allows_ip("203.0.113.11")
