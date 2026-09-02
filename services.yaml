@@ -12,11 +12,11 @@
 
 - name: wms-prosjekter
   path_prefix: /wms/prosjekter
-  upstream: https://services.norgeibilder.no/arcgis/services/prosjekter/ImageServer/WMSServer
+  upstream: https://services.norgeibilder.no/arcgis/services/ortofoto_prosjekter/ImageServer/WMSServer
 
 - name: wms-mosaikk
   path_prefix: /wms/mosaikk
-  upstream: https://services.norgeibilder.no/arcgis/services/mosaikk/ImageServer/WMSServer
+  upstream: https://services.norgeibilder.no/arcgis/services/prosjekter/ImageServer/WMSServer
 
 - name: wmts-utm32
   path_prefix: /wmts/utm32_euref89
