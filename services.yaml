@@ -19,17 +19,17 @@
   upstream: https://services.norgeibilder.no/arcgis/services/mosaikk/ImageServer/WMSServer
 
 - name: wmts-utm32
-  path_prefix: /wmts/utm32
+  path_prefix: /wmts/utm32_euref89
   upstream: https://tilecache.norgeibilder.no/arcgis/rest/services/Nibcache_UTM32_EUREF89_v2/MapServer/WMTS
 
 
 - name: wmts-utm33
-  path_prefix: /wmts/utm33
+  path_prefix: /wmts/utm33_euref89
   upstream: https://tilecache.norgeibilder.no/arcgis/rest/services/Nibcache_UTM33_EUREF89_v2/MapServer/WMTS
 
 
 - name: wmts-utm35
-  path_prefix: /wmts/utm35
+  path_prefix: /wmts/utm35_euref89
   upstream: https://tilecache.norgeibilder.no/arcgis/rest/services/Nibcache_UTM35_EUREF89_v2/MapServer/WMTS
 
 
